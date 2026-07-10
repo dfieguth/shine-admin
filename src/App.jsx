@@ -236,7 +236,7 @@ function Families() {
   )
 }
 
-const BLANK_STUDENT = { first_name: '', last_name: '', grade: '', level: 'Beginner', family_id: '', notes: '' }
+const BLANK_STUDENT = { first_name: '', last_name: '', grade: '', level: 'Beginner', family_id: '', medical_notes: '', notes: '' }
 function Students() {
   const [rows, setRows] = useState(null)
   const [families, setFamilies] = useState([])
@@ -298,6 +298,7 @@ function Students() {
             <Field label="Level" value={edit.level} options={LEVELS} onChange={(e) => setEdit({ ...edit, level: e.target.value })} />
           </div>
           <Field label="Family" value={edit.family_id || ''} options={famOptions} onChange={(e) => setEdit({ ...edit, family_id: e.target.value })} />
+          <Field label="Medical / allergies (staff only)" textarea value={edit.medical_notes || ''} onChange={(e) => setEdit({ ...edit, medical_notes: e.target.value })} placeholder="Allergies, conditions, medications leaders should know about" />
           <Field label="Notes" textarea value={edit.notes || ''} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} />
         </Modal>
       )}
@@ -316,7 +317,7 @@ function Enrollments() {
     const [e, s, c] = await Promise.all([
       supabase.from('enrollments').select('*, students(first_name, last_name), classes(name, day_of_week)').order('created_at', { ascending: false }),
       supabase.from('students').select('id, first_name, last_name').order('last_name'),
-      supabase.from('classes').select('id, name').eq('active', true).order('name'),
+      supabase.from('classes').select('id, name, capacity').eq('active', true).order('name'),
     ])
     setRows(e.data || []); setStudents(s.data || []); setClasses(c.data || [])
   }, [])
@@ -328,6 +329,16 @@ function Enrollments() {
   }
   async function setStatus(id, status) { await supabase.from('enrollments').update({ status }).eq('id', id); load() }
   async function remove(id) { await supabase.from('enrollments').delete().eq('id', id); load() }
+  const [copied, setCopied] = useState('')
+  async function copyEmails() {
+    const { data } = await supabase.from('enrollments').select('students(families(email))').eq('class_id', filterClass).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    if (!emails.length) { setCopied('No emails found'); setTimeout(() => setCopied(''), 2500); return }
+    await navigator.clipboard.writeText(emails.join('; '))
+    setCopied(`Copied ${emails.length} email${emails.length > 1 ? 's' : ''} ✓`)
+    setTimeout(() => setCopied(''), 2500)
+  }
+  const enrolledCountFor = (cid) => (rows || []).filter((r) => r.class_id === cid && r.status === 'enrolled').length
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = filterClass ? rows.filter((r) => r.class_id === filterClass) : rows
   return (
@@ -339,8 +350,13 @@ function Enrollments() {
       <div className="toolbar">
         <select value={filterClass} onChange={(e) => setFilterClass(e.target.value)}>
           <option value="">All classes</option>
-          {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {classes.map((c) => {
+            const n = enrolledCountFor(c.id)
+            const cap = c.capacity ? ` (${n}/${c.capacity}${n >= c.capacity ? ' FULL' : ''})` : ''
+            return <option key={c.id} value={c.id}>{c.name}{cap}</option>
+          })}
         </select>
+        {filterClass && <button className="btn ghost small" onClick={copyEmails}>{copied || 'Copy parent emails'}</button>}
         <div className="spacer" />
         <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{filtered.length} enrollment{filtered.length !== 1 ? 's' : ''}</span>
       </div>
@@ -396,8 +412,16 @@ function Registrations({ onProcessed }) {
       first_name: sFirst || r.student_name, last_name: sRest.join(' ') || '', grade: r.student_grade, family_id: fam?.id || null,
     }).select().single()
     if (r.interested_class && stu) {
-      const { data: match } = await supabase.from('classes').select('id').ilike('name', `%${r.interested_class}%`).limit(1)
-      if (match && match[0]) await supabase.from('enrollments').insert({ student_id: stu.id, class_id: match[0].id, status: 'enrolled' })
+      const { data: cls } = await supabase.from('classes').select('id, name, capacity').eq('active', true)
+      const match = (cls || []).find((c) => r.interested_class.toLowerCase().includes(c.name.toLowerCase()))
+      if (match) {
+        let status = 'enrolled'
+        if (match.capacity) {
+          const { count } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', match.id).eq('status', 'enrolled')
+          if ((count ?? 0) >= match.capacity) status = 'waitlist'
+        }
+        await supabase.from('enrollments').insert({ student_id: stu.id, class_id: match.id, status })
+      }
     }
     await supabase.from('registrations').update({ processed: true }).eq('id', r.id)
     setBusy(false); setProcessing(null); load(); onProcessed && onProcessed()

@@ -26,6 +26,7 @@ create table if not exists students (
   grade text,
   level text,
   family_id uuid references families(id) on delete cascade,
+  medical_notes text,
   notes text,
   created_at timestamptz default now()
 );
@@ -144,3 +145,20 @@ create policy "public read site photos" on storage.objects for select using (buc
 create policy "staff insert site photos" on storage.objects for insert with check (bucket_id = 'site-photos' and auth.role() = 'authenticated');
 create policy "staff update site photos" on storage.objects for update using (bucket_id = 'site-photos' and auth.role() = 'authenticated');
 create policy "staff delete site photos" on storage.objects for delete using (bucket_id = 'site-photos' and auth.role() = 'authenticated');
+
+-- ============================================================
+-- CLASS ENROLLMENT COUNTS (public-safe: counts only)
+-- Lets the public site mark full classes without exposing data
+-- ============================================================
+create or replace function class_enrollment_counts()
+returns table (class_id uuid, enrolled bigint)
+language sql
+security definer
+set search_path = public
+as $$
+  select class_id, count(*)::bigint as enrolled
+  from enrollments
+  where status = 'enrolled'
+  group by class_id;
+$$;
+grant execute on function class_enrollment_counts() to anon, authenticated;
