@@ -243,14 +243,32 @@ function Students() {
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [q, setQ] = useState('')
+  const [photoUrls, setPhotoUrls] = useState({})
+  const [busyPhoto, setBusyPhoto] = useState('')
   const load = useCallback(async () => {
     const [s, f] = await Promise.all([
       supabase.from('students').select('*, families(parent_first_name, parent_last_name)').order('last_name'),
       supabase.from('families').select('id, parent_first_name, parent_last_name').order('parent_last_name'),
     ])
     setRows(s.data || []); setFamilies(f.data || [])
+    // Student photos live in a PRIVATE bucket; signed URLs are staff-only and expire.
+    const paths = (s.data || []).map((r) => r.photo_path).filter(Boolean)
+    if (paths.length) {
+      const { data: signed } = await supabase.storage.from('student-photos').createSignedUrls(paths, 3600)
+      const map = {}
+      for (const it of signed || []) if (it.signedUrl) map[it.path] = it.signedUrl
+      setPhotoUrls(map)
+    } else setPhotoUrls({})
   }, [])
   useEffect(() => { load() }, [load])
+  async function uploadPhoto(s, e) {
+    const file = e.target.files?.[0]; if (!file) return
+    setBusyPhoto(s.id)
+    const path = `students/${s.id}-${Date.now()}.jpg`
+    await supabase.storage.from('student-photos').upload(path, file, { upsert: true, contentType: file.type })
+    await supabase.from('students').update({ photo_path: path }).eq('id', s.id)
+    setBusyPhoto(''); load()
+  }
   async function save() {
     setSaving(true)
     const payload = { ...edit, family_id: edit.family_id || null }
@@ -277,11 +295,24 @@ function Students() {
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
-                <td data-label="Student"><strong>{s.first_name} {s.last_name}</strong></td>
+                <td data-label="Student">
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                    {s.photo_path && photoUrls[s.photo_path]
+                      ? <img src={photoUrls[s.photo_path]} alt="" style={{ width: 40, height: 40, borderRadius: '50%', objectFit: 'cover' }} />
+                      : <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'var(--pine-soft)', display: 'grid', placeItems: 'center', color: 'var(--pine)', fontWeight: 600, fontSize: 14 }}>{(s.first_name || '?')[0]}{(s.last_name || '')[0] || ''}</div>}
+                    <strong>{s.first_name} {s.last_name}</strong>
+                  </div>
+                </td>
                 <td data-label="Grade">{s.grade || '—'}</td>
                 <td data-label="Level">{s.level || '—'}</td>
                 <td data-label="Family">{s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : '—'}</td>
-                <td><div className="row-actions"><button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button></div></td>
+                <td><div className="row-actions">
+                  <label className="btn ghost small" style={{ cursor: 'pointer' }}>
+                    {busyPhoto === s.id ? 'Uploading…' : 'Photo'}
+                    <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => uploadPhoto(s, e)} />
+                  </label>
+                  <button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button>
+                </div></td>
               </tr>
             ))}
           </tbody>
@@ -317,7 +348,7 @@ function Enrollments() {
     const [e, s, c] = await Promise.all([
       supabase.from('enrollments').select('*, students(first_name, last_name), classes(name, day_of_week)').order('created_at', { ascending: false }),
       supabase.from('students').select('id, first_name, last_name').order('last_name'),
-      supabase.from('classes').select('id, name, capacity').eq('active', true).order('name'),
+      supabase.from('classes').select('id, name, capacity, day_of_week, start_time, end_time, instructor_name, level').eq('active', true).order('name'),
     ])
     setRows(e.data || []); setStudents(s.data || []); setClasses(c.data || [])
   }, [])
@@ -339,6 +370,60 @@ function Enrollments() {
     setTimeout(() => setCopied(''), 2500)
   }
   const enrolledCountFor = (cid) => (rows || []).filter((r) => r.class_id === cid && r.status === 'enrolled').length
+  const [broadcast, setBroadcast] = useState(null)
+  const [bcSubject, setBcSubject] = useState('')
+  const [bcMessage, setBcMessage] = useState('')
+  const [bcSending, setBcSending] = useState(false)
+  const [bcNote, setBcNote] = useState('')
+  async function openBroadcast() {
+    const { data } = await supabase.from('enrollments').select('students(families(email))').eq('class_id', filterClass).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    const cls = classes.find((c) => c.id === filterClass)
+    setBcSubject(''); setBcMessage(''); setBcNote('')
+    setBroadcast({ emails, className: cls?.name || 'class' })
+  }
+  function openInEmailApp() {
+    window.location.href = `mailto:?bcc=${encodeURIComponent(broadcast.emails.join(','))}&subject=${encodeURIComponent(bcSubject)}&body=${encodeURIComponent(bcMessage)}`
+  }
+  async function sendViaShine() {
+    setBcSending(true); setBcNote('')
+    const { data, error } = await supabase.functions.invoke('send-broadcast', { body: { subject: bcSubject, message: bcMessage, emails: broadcast.emails } })
+    setBcSending(false)
+    if (error || data?.ok === false) setBcNote('Could not send from Shine — is the email setup finished? "Open in my email app" always works.')
+    else { setBcNote('Sent ✓'); setTimeout(() => setBroadcast(null), 1400) }
+  }
+  function printRoster() {
+    const cls = classes.find((c) => c.id === filterClass)
+    if (!cls) return
+    const enrolled = rows.filter((r) => r.class_id === filterClass && r.status === 'enrolled')
+    const waitlist = rows.filter((r) => r.class_id === filterClass && r.status === 'waitlist')
+    const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
+    const dateCols = 8
+    const blank = '<td>&nbsp;</td>'.repeat(dateCols)
+    const w = window.open('', '_blank')
+    w.document.write(`<!doctype html><html><head><title>${cls.name} roster</title><style>
+      body{font-family:Georgia,serif;margin:28px;color:#222}
+      h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 4px}
+      .legend{font-size:12px;margin:8px 0 14px}
+      table{width:100%;border-collapse:collapse;font-size:13px}
+      th,td{border:1px solid #999;padding:7px 8px;text-align:left;height:22px}
+      th{background:#eee;font-size:11px} td:first-child{width:26px;text-align:center;color:#777}
+      .wl{margin-top:18px;font-size:13px} .wl b{display:block;margin-bottom:4px}
+      .line{margin-top:16px;font-size:13px}
+      @media print { body{margin:10mm} }
+    </style></head><body>
+      <h1>${cls.name}${cls.level ? ` — ${cls.level}` : ''}</h1>
+      <p class="sub">${cls.day_of_week || ''} ${cls.start_time || ''}${cls.end_time ? `–${cls.end_time}` : ''}${cls.instructor_name ? ` · ${cls.instructor_name}` : ''} · Printed ${new Date().toLocaleDateString()}</p>
+      <p class="legend">Present: ✓ &nbsp;&nbsp; Tardy: T &nbsp;&nbsp; Absent: ○</p>
+      <table><tr><th></th><th>Student</th>${'<th>&nbsp;/&nbsp;</th>'.repeat(dateCols)}</tr>
+      ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${blank}</tr>`).join('')}
+      ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + blank + '</tr>'.repeat(2)}
+      </table>
+      <p class="line">Class Mom: ______________________________</p>
+      ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
+    </body></html>`)
+    w.document.close(); w.focus(); w.print()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = filterClass ? rows.filter((r) => r.class_id === filterClass) : rows
   return (
@@ -357,6 +442,8 @@ function Enrollments() {
           })}
         </select>
         {filterClass && <button className="btn ghost small" onClick={copyEmails}>{copied || 'Copy parent emails'}</button>}
+        {filterClass && <button className="btn ghost small" onClick={printRoster}>Print roster</button>}
+        {filterClass && <button className="btn ghost small" onClick={openBroadcast}>Email class</button>}
         <div className="spacer" />
         <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{filtered.length} enrollment{filtered.length !== 1 ? 's' : ''}</span>
       </div>
@@ -381,6 +468,26 @@ function Enrollments() {
             ))}
           </tbody>
         </table></div>
+      )}
+      {broadcast && (
+        <div className="overlay" onClick={() => setBroadcast(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><h2>Email {broadcast.className}</h2></div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13.5, color: 'var(--ink-soft)' }}>
+                {broadcast.emails.length} parent email{broadcast.emails.length !== 1 ? 's' : ''}, sent as BCC so families never see each other's addresses.
+              </p>
+              <Field label="Subject" value={bcSubject} onChange={(e) => setBcSubject(e.target.value)} placeholder="No class this Monday" />
+              <Field label="Message" textarea value={bcMessage} onChange={(e) => setBcMessage(e.target.value)} style={{ minHeight: 130 }} />
+              {bcNote && <p style={{ fontSize: 13, color: bcNote.startsWith('Sent') ? 'var(--ok)' : 'var(--danger)' }}>{bcNote}</p>}
+            </div>
+            <div className="modal-foot" style={{ flexWrap: 'wrap' }}>
+              <button className="btn ghost" onClick={() => setBroadcast(null)}>Cancel</button>
+              <button className="btn ghost" onClick={openInEmailApp} disabled={!broadcast.emails.length || !bcSubject.trim()}>Open in my email app</button>
+              <button className="btn" onClick={sendViaShine} disabled={bcSending || !bcSubject.trim() || !bcMessage.trim() || !broadcast.emails.length}>{bcSending ? 'Sending…' : 'Send from Shine'}</button>
+            </div>
+          </div>
+        </div>
       )}
       {adding && (
         <Modal title="Enroll a student" onClose={() => setAdding(null)} onSave={addEnrollment} saving={saving} saveLabel="Enroll">
@@ -541,28 +648,38 @@ function Attendance() {
     const ids = (enr || []).map((e) => e.id)
     const existing = {}
     if (ids.length) {
-      const { data: att } = await supabase.from('attendance').select('enrollment_id, present').eq('class_date', date).in('enrollment_id', ids)
-      for (const a of att || []) existing[a.enrollment_id] = a.present
+      const { data: att } = await supabase.from('attendance').select('enrollment_id, present, status').eq('class_date', date).in('enrollment_id', ids)
+      for (const a of att || []) existing[a.enrollment_id] = a.status || (a.present ? 'present' : 'absent')
     }
     setRoster((enr || []).map((e) => ({
       enrollment_id: e.id,
       name: e.students ? `${e.students.first_name} ${e.students.last_name}` : '—',
-      present: existing[e.id] ?? false,
+      status: existing[e.id] ?? '',
     })))
   }, [classId, date])
   useEffect(() => { loadRoster() }, [loadRoster])
 
-  function toggle(id) { setRoster(roster.map((r) => r.enrollment_id === id ? { ...r, present: !r.present } : r)) }
+  // Tap cycles: unmarked → present → tardy → absent → unmarked
+  const NEXT = { '': 'present', present: 'tardy', tardy: 'absent', absent: '' }
+  function toggle(id) { setRoster(roster.map((r) => r.enrollment_id === id ? { ...r, status: NEXT[r.status] } : r)) }
 
   async function save() {
     setSaving(true)
     const ids = roster.map((r) => r.enrollment_id)
     await supabase.from('attendance').delete().eq('class_date', date).in('enrollment_id', ids)
-    await supabase.from('attendance').insert(roster.map((r) => ({ enrollment_id: r.enrollment_id, class_date: date, present: r.present })))
+    const marked = roster.filter((r) => r.status)
+    if (marked.length) {
+      await supabase.from('attendance').insert(marked.map((r) => ({
+        enrollment_id: r.enrollment_id, class_date: date, status: r.status,
+        present: r.status === 'present' || r.status === 'tardy',
+      })))
+    }
     setSaving(false); setSavedMsg('Saved ✓'); setTimeout(() => setSavedMsg(''), 2500)
   }
 
-  const presentCount = roster ? roster.filter((r) => r.present).length : 0
+  const presentCount = roster ? roster.filter((r) => r.status === 'present' || r.status === 'tardy').length : 0
+  const statusLabel = { present: '✓ Present', tardy: 'T Tardy', absent: '○ Absent', '': 'Tap to mark' }
+  const statusPill = { present: 'enrolled', tardy: 'waitlist', absent: 'dropped', '': 'inactive' }
   return (
     <>
       <div className="page-head"><div><h1>Attendance</h1><p>Pick a class and a date, check off who's here, save.</p></div></div>
@@ -584,12 +701,12 @@ function Attendance() {
       ) : (
         <>
           <div className="table-wrap"><table>
-            <thead><tr><th>Student</th><th>Present</th></tr></thead>
+            <thead><tr><th>Student</th><th>Status (tap row to cycle)</th></tr></thead>
             <tbody>
               {roster.map((r) => (
                 <tr key={r.enrollment_id} onClick={() => toggle(r.enrollment_id)} style={{ cursor: 'pointer' }}>
                   <td data-label="Student"><strong>{r.name}</strong></td>
-                  <td data-label="Present"><input type="checkbox" checked={r.present} onChange={() => toggle(r.enrollment_id)} onClick={(e) => e.stopPropagation()} /></td>
+                  <td data-label="Status"><span className={`pill ${statusPill[r.status]}`}>{statusLabel[r.status]}</span></td>
                 </tr>
               ))}
             </tbody>
@@ -740,6 +857,144 @@ function Announcements() {
   )
 }
 
+const BLANK_MEMBER = { name: '', role: '', bio: '', sort_order: 0, active: true }
+function Team() {
+  const [rows, setRows] = useState(null)
+  const [edit, setEdit] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [busyPhoto, setBusyPhoto] = useState('')
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('team_members').select('*').order('sort_order').order('created_at')
+    setRows(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  const photoUrl = (p) => p ? supabase.storage.from(BUCKET).getPublicUrl(p).data.publicUrl : null
+  async function save() {
+    setSaving(true)
+    const payload = { ...edit, sort_order: Number(edit.sort_order) || 0 }
+    if (edit.id) await supabase.from('team_members').update(payload).eq('id', edit.id)
+    else await supabase.from('team_members').insert(payload)
+    setSaving(false); setEdit(null); load()
+  }
+  async function uploadPhoto(member, e) {
+    const file = e.target.files?.[0]; if (!file) return
+    setBusyPhoto(member.id)
+    const path = `team/${member.id}-${Date.now()}.jpg`
+    await supabase.storage.from(BUCKET).upload(path, file, { upsert: true, contentType: file.type })
+    await supabase.from('team_members').update({ photo_path: path }).eq('id', member.id)
+    setBusyPhoto(''); load()
+  }
+  async function toggleActive(m) { await supabase.from('team_members').update({ active: !m.active }).eq('id', m.id); load() }
+  async function remove(id) { await supabase.from('team_members').delete().eq('id', id); load() }
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head">
+        <div><h1>Our Team</h1><p>Bios and photos shown on the public site's "Meet the instructors" section. Only active members appear.</p></div>
+        <button className="btn" onClick={() => setEdit({ ...BLANK_MEMBER })}>Add team member</button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No team members yet</h3><p>Add Corrie and the teaching team. Until then the public site shows simple placeholder cards.</p><button className="btn" onClick={() => setEdit({ ...BLANK_MEMBER })}>Add team member</button></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Member</th><th>Bio</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((m) => (
+              <tr key={m.id}>
+                <td data-label="Member" style={{ minWidth: 180 }}>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                    {photoUrl(m.photo_path)
+                      ? <img src={photoUrl(m.photo_path)} alt="" style={{ width: 44, height: 44, borderRadius: '50%', objectFit: 'cover' }} />
+                      : <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'var(--pine-soft)', display: 'grid', placeItems: 'center', color: 'var(--pine)', fontWeight: 600 }}>{(m.name || '?')[0]}</div>}
+                    <div><strong>{m.name}</strong><br /><span style={{ color: 'var(--brass-dark, #a3741f)', fontSize: 12.5, fontWeight: 600 }}>{m.role}</span></div>
+                  </div>
+                </td>
+                <td data-label="Bio" style={{ maxWidth: 340 }}><span style={{ color: 'var(--ink-soft)', fontSize: 13.5 }}>{m.bio ? (m.bio.length > 120 ? m.bio.slice(0, 120) + '…' : m.bio) : '—'}</span></td>
+                <td data-label="Status"><span className={`pill ${m.active ? 'enrolled' : 'inactive'}`}>{m.active ? 'Live' : 'Hidden'}</span></td>
+                <td><div className="row-actions">
+                  <label className="btn ghost small" style={{ cursor: 'pointer' }}>
+                    {busyPhoto === m.id ? 'Uploading…' : 'Photo'}
+                    <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => uploadPhoto(m, e)} />
+                  </label>
+                  <button className="btn ghost small" onClick={() => setEdit(m)}>Edit</button>
+                  <button className="btn ghost small" onClick={() => toggleActive(m)}>{m.active ? 'Hide' : 'Show'}</button>
+                  <button className="btn danger small" onClick={() => remove(m.id)}>Delete</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+      {edit && (
+        <Modal title={edit.id ? 'Edit team member' : 'Add team member'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+          <div className="field row2">
+            <Field label="Name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
+            <Field label="Role" value={edit.role || ''} onChange={(e) => setEdit({ ...edit, role: e.target.value })} placeholder="Studio Director" />
+          </div>
+          <Field label="Bio (2–3 warm sentences)" textarea value={edit.bio || ''} onChange={(e) => setEdit({ ...edit, bio: e.target.value })} />
+          <Field label="Sort order (lower = first)" type="number" value={edit.sort_order} onChange={(e) => setEdit({ ...edit, sort_order: e.target.value })} />
+        </Modal>
+      )}
+    </>
+  )
+}
+
+const BLANK_QUOTE = { quote: '', attribution: '', active: true }
+function Testimonials() {
+  const [rows, setRows] = useState(null)
+  const [edit, setEdit] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('testimonials').select('*').order('created_at', { ascending: false })
+    setRows(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function save() {
+    setSaving(true)
+    if (edit.id) await supabase.from('testimonials').update(edit).eq('id', edit.id)
+    else await supabase.from('testimonials').insert(edit)
+    setSaving(false); setEdit(null); load()
+  }
+  async function toggleActive(t) { await supabase.from('testimonials').update({ active: !t.active }).eq('id', t.id); load() }
+  async function remove(id) { await supabase.from('testimonials').delete().eq('id', id); load() }
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head">
+        <div><h1>Testimonials</h1><p>Real quotes from real parents, shown on the public site. The section stays hidden until at least one is live. Only use quotes parents gave permission to share.</p></div>
+        <button className="btn" onClick={() => setEdit({ ...BLANK_QUOTE })}>Add quote</button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No quotes yet</h3><p>Ask a few parents for two sentences about what Shine means to their dancer. First names only is fine (e.g. "— Maria, Ballet IA parent").</p><button className="btn" onClick={() => setEdit({ ...BLANK_QUOTE })}>Add quote</button></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Quote</th><th>From</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id}>
+                <td data-label="Quote" style={{ maxWidth: 420 }}>"{t.quote.length > 140 ? t.quote.slice(0, 140) + '…' : t.quote}"</td>
+                <td data-label="From">{t.attribution || '—'}</td>
+                <td data-label="Status"><span className={`pill ${t.active ? 'enrolled' : 'inactive'}`}>{t.active ? 'Live' : 'Hidden'}</span></td>
+                <td><div className="row-actions">
+                  <button className="btn ghost small" onClick={() => setEdit(t)}>Edit</button>
+                  <button className="btn ghost small" onClick={() => toggleActive(t)}>{t.active ? 'Hide' : 'Show'}</button>
+                  <button className="btn danger small" onClick={() => remove(t.id)}>Delete</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+      {edit && (
+        <Modal title={edit.id ? 'Edit quote' : 'Add quote'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+          <Field label="Quote (no quotation marks needed)" textarea value={edit.quote} onChange={(e) => setEdit({ ...edit, quote: e.target.value })} />
+          <Field label="Attribution" value={edit.attribution || ''} onChange={(e) => setEdit({ ...edit, attribution: e.target.value })} placeholder="Maria, Ballet IA parent" />
+        </Modal>
+      )}
+    </>
+  )
+}
+
 const NAV = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'enrollments', label: 'Enrollments' },
@@ -749,6 +1004,8 @@ const NAV = [
   { key: 'families', label: 'Families' },
   { key: 'teachers', label: 'Teachers' },
   { key: 'photos', label: 'Photos' },
+  { key: 'team', label: 'Our Team' },
+  { key: 'testimonials', label: 'Testimonials' },
   { key: 'announcements', label: 'Announcements' },
   { key: 'registrations', label: 'Registrations' },
 ]
@@ -790,6 +1047,8 @@ export default function App() {
         {page === 'families' && <Families />}
         {page === 'teachers' && <Teachers />}
         {page === 'photos' && <Photos />}
+        {page === 'team' && <Team />}
+        {page === 'testimonials' && <Testimonials />}
         {page === 'announcements' && <Announcements />}
         {page === 'registrations' && <Registrations onProcessed={refreshRegCount} />}
       </main>
