@@ -95,7 +95,7 @@ function Dashboard({ go }) {
   )
 }
 
-const BLANK_CLASS = { name: '', level: 'Beginner', day_of_week: 'Monday', start_time: '', end_time: '', location: '', capacity: '', instructor_name: '', active: true }
+const BLANK_CLASS = { name: '', level: 'Beginner', day_of_week: 'Monday', start_time: '', end_time: '', location: '', capacity: '', instructor_name: '', min_age: '', max_age: '', room_id: '', teacher_id: '', active: true }
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 const LEVELS = ['Beginner', 'Intermediate', 'Advanced', 'All levels']
 
@@ -104,41 +104,68 @@ function Classes() {
   const [teachers, setTeachers] = useState([])
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [seasonFilter, setSeasonFilter] = useState('')
+  const [clsErr, setClsErr] = useState('')
+  const [rooms, setRooms] = useState([])
   const load = useCallback(async () => {
-    const [c, t] = await Promise.all([
-      supabase.from('classes').select('*').order('active', { ascending: false }).order('day_of_week'),
+    const [c, t, rm] = await Promise.all([
+      supabase.from('classes').select('*, rooms(name), teachers(name)').order('season', { ascending: false }).order('active', { ascending: false }).order('day_of_week'),
       supabase.from('teachers').select('id, name').order('name'),
+      supabase.from('rooms').select('id, name').order('name'),
     ])
-    setRows(c.data || []); setTeachers(t.data || [])
-  }, [])
+    setRows(c.data || []); setTeachers(t.data || []); setRooms(rm.data || [])
+    if (!seasonFilter && c.data?.length) setSeasonFilter(c.data[0].season || '')
+  }, [seasonFilter])
   useEffect(() => { load() }, [load])
   async function save() {
     setSaving(true)
-    const payload = { ...edit, capacity: edit.capacity === '' ? null : Number(edit.capacity) }
-    if (edit.id) await supabase.from('classes').update(payload).eq('id', edit.id)
-    else await supabase.from('classes').insert(payload)
-    setSaving(false); setEdit(null); load()
+    const payload = {
+      ...edit,
+      capacity: edit.capacity === '' ? null : Number(edit.capacity),
+      min_age: edit.min_age === '' ? null : Number(edit.min_age),
+      max_age: edit.max_age === '' ? null : Number(edit.max_age),
+      room_id: edit.room_id || null,
+      teacher_id: edit.teacher_id || null,
+    }
+    delete payload.rooms; delete payload.teachers
+    const { error } = edit.id
+      ? await supabase.from('classes').update(payload).eq('id', edit.id)
+      : await supabase.from('classes').insert(payload)
+    setSaving(false)
+    if (error) { setClsErr(error.message || 'Could not save. Make sure the database is up to date (run the latest SQL).'); return }
+    setEdit(null); load()
   }
   async function toggleActive(c) { await supabase.from('classes').update({ active: !c.active }).eq('id', c.id); load() }
   if (!rows) return <div className="loading">Loading…</div>
+  const allSeasons = [...new Set(rows.map((c) => c.season || 'unlabeled'))]
+  const visible = seasonFilter ? rows.filter((c) => (c.season || 'unlabeled') === seasonFilter) : rows
   return (
     <>
       <div className="page-head">
         <div><h1>Classes</h1><p>Add, edit, or retire a class. Retired classes disappear from the public schedule.</p></div>
-        <button className="btn" onClick={() => setEdit({ ...BLANK_CLASS })}>Add class</button>
+        <button className="btn" onClick={() => { setClsErr(''); setEdit({ ...BLANK_CLASS, season: seasonFilter || undefined }) }}>Add class</button>
       </div>
-      {rows.length === 0 ? (
+      {allSeasons.length > 1 && (
+        <div className="toolbar">
+          <select value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
+            {allSeasons.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>Showing {visible.length} of {rows.length} classes across all seasons</span>
+        </div>
+      )}
+      {visible.length === 0 ? (
         <div className="card"><div className="empty"><h3>No classes yet</h3><p>Add your first class to start building the schedule.</p><button className="btn" onClick={() => setEdit({ ...BLANK_CLASS })}>Add class</button></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Class</th><th>Level</th><th>When</th><th>Instructor</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Class</th><th>Level</th><th>When</th><th>Room</th><th>Instructor</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            {rows.map((c) => (
+            {visible.map((c) => (
               <tr key={c.id}>
                 <td data-label="Class"><strong>{c.name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{c.location}</span></td>
-                <td data-label="Level">{c.level}</td>
+                <td data-label="Level">{c.level}{(c.min_age || c.max_age) && <><br /><span style={{ color: 'var(--ink-soft)', fontSize: 12.5 }}>Ages {c.min_age || '0'}{c.max_age ? `–${c.max_age}` : '+'}</span></>}</td>
                 <td data-label="When">{c.day_of_week}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{c.start_time}{c.end_time ? `–${c.end_time}` : ''}</span></td>
-                <td data-label="Instructor">{c.instructor_name || '—'}</td>
+                <td data-label="Room">{c.rooms?.name || '—'}</td>
+                <td data-label="Instructor">{c.teachers?.name || c.instructor_name || '—'}</td>
                 <td data-label="Status"><span className={`pill ${c.active ? 'enrolled' : 'inactive'}`}>{c.active ? 'Active' : 'Retired'}</span></td>
                 <td><div className="row-actions">
                   <button className="btn ghost small" onClick={() => setEdit(c)}>Edit</button>
@@ -151,7 +178,8 @@ function Classes() {
       )}
       {edit && (
         <Modal title={edit.id ? 'Edit class' : 'Add class'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
-          <Field label="Class name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="Tuesday Beginner Ballet" />
+          {clsErr && <div className="auth-err" style={{ marginBottom: 4 }}>{clsErr}</div>}
+          <Field label="Class name (type anything — add as many classes as you need)" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="e.g. Tuesday Beginner Ballet" />
           <div className="field row2">
             <Field label="Level" value={edit.level} options={LEVELS} onChange={(e) => setEdit({ ...edit, level: e.target.value })} />
             <Field label="Day" value={edit.day_of_week} options={DAYS} onChange={(e) => setEdit({ ...edit, day_of_week: e.target.value })} />
@@ -162,10 +190,14 @@ function Classes() {
           </div>
           <Field label="Location" value={edit.location} onChange={(e) => setEdit({ ...edit, location: e.target.value })} placeholder="Fellowship Hall" />
           <div className="field row2">
-            <Field label="Instructor" list="teachers-dl" value={edit.instructor_name} onChange={(e) => setEdit({ ...edit, instructor_name: e.target.value })} placeholder="pick or type a name" />
-            <Field label="Capacity" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} placeholder="optional" />
+            <Field label="Teacher" value={edit.teacher_id || ''} options={[{ value: '', label: '— choose —' }, ...teachers.map((t) => ({ value: t.id, label: t.name }))]} onChange={(e) => setEdit({ ...edit, teacher_id: e.target.value })} />
+            <Field label="Room" value={edit.room_id || ''} options={[{ value: '', label: '— choose —' }, ...rooms.map((r) => ({ value: r.id, label: r.name }))]} onChange={(e) => setEdit({ ...edit, room_id: e.target.value })} />
           </div>
-          <datalist id="teachers-dl">{teachers.map((t) => <option key={t.id} value={t.name} />)}</datalist>
+          <Field label="Capacity (optional)" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} />
+          <div className="field row2">
+            <Field label="Min age (optional)" type="number" value={edit.min_age ?? ''} onChange={(e) => setEdit({ ...edit, min_age: e.target.value })} placeholder="e.g. 7" />
+            <Field label="Max age (optional)" type="number" value={edit.max_age ?? ''} onChange={(e) => setEdit({ ...edit, max_age: e.target.value })} placeholder="e.g. 9, blank = no max" />
+          </div>
         </Modal>
       )}
     </>
@@ -269,13 +301,17 @@ function Students() {
     await supabase.from('students').update({ photo_path: path }).eq('id', s.id)
     setBusyPhoto(''); load()
   }
+  const [saveErr, setSaveErr] = useState('')
   async function save() {
-    setSaving(true)
+    setSaving(true); setSaveErr('')
     const payload = { ...edit, family_id: edit.family_id || null }
     delete payload.families
-    if (edit.id) await supabase.from('students').update(payload).eq('id', edit.id)
-    else await supabase.from('students').insert(payload)
-    setSaving(false); setEdit(null); load()
+    const { error } = edit.id
+      ? await supabase.from('students').update(payload).eq('id', edit.id)
+      : await supabase.from('students').insert(payload)
+    setSaving(false)
+    if (error) { setSaveErr(error.message || 'Could not save. Make sure the database is up to date.'); return }
+    setEdit(null); load()
   }
   if (!rows) return <div className="loading">Loading…</div>
   const famOptions = [{ value: '', label: '— none —' }, ...families.map((f) => ({ value: f.id, label: `${f.parent_first_name} ${f.parent_last_name}` }))]
@@ -320,6 +356,7 @@ function Students() {
       )}
       {edit && (
         <Modal title={edit.id ? 'Edit student' : 'Add student'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+          {saveErr && <div className="auth-err" style={{ marginBottom: 4 }}>{saveErr}</div>}
           <div className="field row2">
             <Field label="First name" value={edit.first_name} onChange={(e) => setEdit({ ...edit, first_name: e.target.value })} />
             <Field label="Last name" value={edit.last_name} onChange={(e) => setEdit({ ...edit, last_name: e.target.value })} />
@@ -346,7 +383,7 @@ function Enrollments() {
   const [filterClass, setFilterClass] = useState('')
   const load = useCallback(async () => {
     const [e, s, c] = await Promise.all([
-      supabase.from('enrollments').select('*, students(first_name, last_name), classes(name, day_of_week)').order('created_at', { ascending: false }),
+      supabase.from('enrollments').select('*, students(first_name, last_name, grade), classes(name, day_of_week)').order('created_at', { ascending: false }),
       supabase.from('students').select('id, first_name, last_name').order('last_name'),
       supabase.from('classes').select('id, name, capacity, day_of_week, start_time, end_time, instructor_name, level').eq('active', true).order('name'),
     ])
@@ -370,6 +407,8 @@ function Enrollments() {
     setTimeout(() => setCopied(''), 2500)
   }
   const enrolledCountFor = (cid) => (rows || []).filter((r) => r.class_id === cid && r.status === 'enrolled').length
+  const [groupBy, setGroupBy] = useState('')
+  const [groupValue, setGroupValue] = useState('')
   const [broadcast, setBroadcast] = useState(null)
   const [bcSubject, setBcSubject] = useState('')
   const [bcMessage, setBcMessage] = useState('')
@@ -382,6 +421,20 @@ function Enrollments() {
     setBcSubject(''); setBcMessage(''); setBcNote('')
     setBroadcast({ emails, className: cls?.name || 'class' })
   }
+  function classGroupVal(c, by) {
+    if (by === 'day') return c.day_of_week || ''
+    if (by === 'room') return c.rooms?.name || ''
+    if (by === 'teacher') return c.teachers?.name || c.instructor_name || ''
+    return ''
+  }
+  async function openGroupBroadcast() {
+    const groupClasses = classes.filter((c) => classGroupVal(c, groupBy) === groupValue)
+    const ids = groupClasses.map((c) => c.id)
+    const { data } = await supabase.from('enrollments').select('students(families(email))').in('class_id', ids).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    setBcSubject(''); setBcMessage(''); setBcNote('')
+    setBroadcast({ emails, className: `${groupValue} (${groupClasses.length} classes)` })
+  }
   function openInEmailApp() {
     window.location.href = `mailto:?bcc=${encodeURIComponent(broadcast.emails.join(','))}&subject=${encodeURIComponent(bcSubject)}&body=${encodeURIComponent(bcMessage)}`
   }
@@ -392,14 +445,17 @@ function Enrollments() {
     if (error || data?.ok === false) setBcNote('Could not send from Shine — is the email setup finished? "Open in my email app" always works.')
     else { setBcNote('Sent ✓'); setTimeout(() => setBroadcast(null), 1400) }
   }
-  function printRoster() {
+  async function printRoster() {
     const cls = classes.find((c) => c.id === filterClass)
     if (!cls) return
+    const { data: priv } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
     const enrolled = rows.filter((r) => r.class_id === filterClass && r.status === 'enrolled')
     const waitlist = rows.filter((r) => r.class_id === filterClass && r.status === 'waitlist')
     const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
     const dateCols = 8
     const blank = '<td>&nbsp;</td>'.repeat(dateCols)
+    const showAge = !priv?.hide_student_ages
+    const showEmg = !!priv?.show_emergency_contact
     const w = window.open('', '_blank')
     w.document.write(`<!doctype html><html><head><title>${cls.name} roster</title><style>
       body{font-family:Georgia,serif;margin:28px;color:#222}
@@ -415,9 +471,9 @@ function Enrollments() {
       <h1>${cls.name}${cls.level ? ` — ${cls.level}` : ''}</h1>
       <p class="sub">${cls.day_of_week || ''} ${cls.start_time || ''}${cls.end_time ? `–${cls.end_time}` : ''}${cls.instructor_name ? ` · ${cls.instructor_name}` : ''} · Printed ${new Date().toLocaleDateString()}</p>
       <p class="legend">Present: ✓ &nbsp;&nbsp; Tardy: T &nbsp;&nbsp; Absent: ○</p>
-      <table><tr><th></th><th>Student</th>${'<th>&nbsp;/&nbsp;</th>'.repeat(dateCols)}</tr>
-      ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${blank}</tr>`).join('')}
-      ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + blank + '</tr>'.repeat(2)}
+      <table><tr><th></th><th>Student</th>${showAge ? '<th>Age</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${'<th>&nbsp;/&nbsp;</th>'.repeat(dateCols)}</tr>
+      ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${r.students?.grade || ''}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blank}</tr>`).join('')}
+      ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + (showAge ? '<td>&nbsp;</td>' : '') + (showEmg ? '<td>&nbsp;</td>' : '') + blank + '</tr>'.repeat(2)}
       </table>
       <p class="line">Class Mom: ______________________________</p>
       ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
@@ -446,6 +502,22 @@ function Enrollments() {
         {filterClass && <button className="btn ghost small" onClick={openBroadcast}>Email class</button>}
         <div className="spacer" />
         <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{filtered.length} enrollment{filtered.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div className="toolbar">
+        <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Email a whole group — pick by:</span>
+        <select value={groupBy} onChange={(e) => { setGroupBy(e.target.value); setGroupValue('') }}>
+          <option value="">— none —</option>
+          <option value="day">Day of week</option>
+          <option value="room">Room</option>
+          <option value="teacher">Teacher</option>
+        </select>
+        {groupBy && (
+          <select value={groupValue} onChange={(e) => setGroupValue(e.target.value)}>
+            <option value="">— pick —</option>
+            {[...new Set(classes.map((c) => classGroupVal(c, groupBy)).filter(Boolean))].sort().map((v) => <option key={v} value={v}>{v}</option>)}
+          </select>
+        )}
+        {groupBy && groupValue && <button className="btn" onClick={openGroupBroadcast}>Email this group</button>}
       </div>
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No enrollments here</h3><p>Enroll a student to get started.</p></div></div>
@@ -995,11 +1067,208 @@ function Testimonials() {
   )
 }
 
+function currentSeasonLabel() {
+  // Shine's season runs roughly Aug-May. Aug or later = "this year-next year".
+  const now = new Date()
+  const y = now.getFullYear()
+  return now.getMonth() >= 6 ? `${y}-${y + 1}` : `${y - 1}-${y}`
+}
+
+const BLANK_ROOM = { name: '', capacity: '' }
+function Rooms() {
+  const [rows, setRows] = useState(null)
+  const [edit, setEdit] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('rooms').select('*').order('name')
+    setRows(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function save() {
+    setSaving(true)
+    const payload = { ...edit, capacity: edit.capacity === '' ? null : Number(edit.capacity) }
+    if (edit.id) await supabase.from('rooms').update(payload).eq('id', edit.id)
+    else await supabase.from('rooms').insert(payload)
+    setSaving(false); setEdit(null); load()
+  }
+  async function remove(id) { await supabase.from('rooms').delete().eq('id', id); load() }
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head">
+        <div><h1>Rooms</h1><p>The spaces classes meet in. Assign a room to each class on the Classes screen.</p></div>
+        <button className="btn" onClick={() => setEdit({ ...BLANK_ROOM })}>Add room</button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No rooms yet</h3><p>Add the rooms your classes use.</p><button className="btn" onClick={() => setEdit({ ...BLANK_ROOM })}>Add room</button></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Room</th><th>Capacity</th><th></th></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.id}>
+              <td data-label="Room"><strong>{r.name}</strong></td>
+              <td data-label="Capacity">{r.capacity || '—'}</td>
+              <td><div className="row-actions">
+                <button className="btn ghost small" onClick={() => setEdit(r)}>Edit</button>
+                <button className="btn danger small" onClick={() => remove(r.id)}>Delete</button>
+              </div></td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+      {edit && (
+        <Modal title={edit.id ? 'Edit room' : 'Add room'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+          <Field label="Room name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="B21" />
+          <Field label="Capacity (optional)" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} />
+        </Modal>
+      )}
+    </>
+  )
+}
+
+function SeasonRollover() {
+  const [classes, setClasses] = useState(null)
+  const [seasons, setSeasons] = useState([])
+  const [targetSeason, setTargetSeason] = useState(currentSeasonLabel())
+  const [selected, setSelected] = useState({})
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState('')
+
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('classes').select('*').order('season', { ascending: false }).order('day_of_week')
+    setClasses(data || [])
+    setSeasons([...new Set((data || []).map((c) => c.season || 'unlabeled'))])
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const sourceSeason = seasons.find((s) => s !== targetSeason) || seasons[0]
+  const sourceClasses = (classes || []).filter((c) => (c.season || 'unlabeled') === sourceSeason)
+
+  useEffect(() => {
+    setSelected(Object.fromEntries(sourceClasses.map((c) => [c.id, true])))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceSeason, classes])
+
+  function toggle(id) { setSelected({ ...selected, [id]: !selected[id] }) }
+  function toggleAll(v) { setSelected(Object.fromEntries(sourceClasses.map((c) => [c.id, v]))) }
+
+  async function runRollover() {
+    setRunning(true); setResult('')
+    const toCopy = sourceClasses.filter((c) => selected[c.id])
+    const payload = toCopy.map((c) => ({
+      name: c.name, level: c.level, day_of_week: c.day_of_week, start_time: c.start_time,
+      end_time: c.end_time, location: c.location, capacity: c.capacity, instructor_name: c.instructor_name,
+      min_age: c.min_age, max_age: c.max_age, active: true, season: targetSeason,
+    }))
+    if (payload.length) await supabase.from('classes').insert(payload)
+    setRunning(false)
+    setResult(`Copied ${payload.length} class${payload.length !== 1 ? 'es' : ''} into ${targetSeason}. Students were NOT auto-enrolled — re-enroll returning students in the new season's classes via Enrollments.`)
+    load()
+  }
+
+  if (!classes) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head"><div><h1>New Season Rollover</h1><p>Copy last season's classes forward instead of re-entering them by hand each year.</p></div></div>
+      <div className="card card-pad" style={{ marginBottom: 20 }}>
+        <p style={{ fontSize: 14, color: 'var(--ink-soft)', marginBottom: 14 }}>
+          This copies the class SHAPE (name, day, time, location, instructor, capacity, age range) into a new season as fresh, empty classes.
+          It deliberately does <strong>not</strong> copy enrollments — each year's roster should be a deliberate choice, not an assumption
+          that everyone is returning. After running this, use Enrollments to add returning students to their new-season classes.
+        </p>
+        <div className="field row2">
+          <Field label="Copy FROM season" value={sourceSeason || ''} options={seasons} onChange={() => {}} disabled />
+          <Field label="Copy TO season (new)" value={targetSeason} onChange={(e) => setTargetSeason(e.target.value)} placeholder="e.g. 2026-2027" />
+        </div>
+      </div>
+      {sourceClasses.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No classes found in {sourceSeason}</h3><p>Add classes first, or pick a different source season.</p></div></div>
+      ) : (
+        <>
+          <div className="toolbar">
+            <button className="btn ghost small" onClick={() => toggleAll(true)}>Select all</button>
+            <button className="btn ghost small" onClick={() => toggleAll(false)}>Select none</button>
+            <div className="spacer" />
+            <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{Object.values(selected).filter(Boolean).length} of {sourceClasses.length} selected</span>
+          </div>
+          <div className="table-wrap"><table>
+            <thead><tr><th></th><th>Class</th><th>When</th><th>Instructor</th></tr></thead>
+            <tbody>
+              {sourceClasses.map((c) => (
+                <tr key={c.id} onClick={() => toggle(c.id)} style={{ cursor: 'pointer' }}>
+                  <td><input type="checkbox" checked={!!selected[c.id]} onChange={() => toggle(c.id)} onClick={(e) => e.stopPropagation()} /></td>
+                  <td data-label="Class"><strong>{c.name}</strong></td>
+                  <td data-label="When">{c.day_of_week} {c.start_time}</td>
+                  <td data-label="Instructor">{c.instructor_name || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+          <div className="toolbar" style={{ marginTop: 16 }}>
+            <button className="btn" onClick={runRollover} disabled={running || !targetSeason.trim()}>
+              {running ? 'Copying…' : `Copy ${Object.values(selected).filter(Boolean).length} classes to ${targetSeason || '…'}`}
+            </button>
+          </div>
+          {result && <div className="card card-pad" style={{ marginTop: 16 }}><p style={{ fontSize: 14 }}>{result}</p></div>}
+        </>
+      )}
+    </>
+  )
+}
+
+function PrivacySettings() {
+  const [s, setS] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState('')
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
+      setS(data)
+    })()
+  }, [])
+  async function save() {
+    setSaving(true)
+    await supabase.from('privacy_settings').update(s).eq('id', 1)
+    setSaving(false); setSaved('Saved ✓'); setTimeout(() => setSaved(''), 2000)
+  }
+  function toggle(key) { setS({ ...s, [key]: !s[key] }) }
+  if (!s) return <div className="loading">Loading…</div>
+  const ROWS = [
+    ['hide_student_pictures', 'Hide student pictures', 'Student photos never appear on printed rosters or shared views, even to other staff without direct access.'],
+    ['hide_parent_phone', 'Hide parent phone number', 'Hides phone numbers on printed rosters (still visible on the Families screen).'],
+    ['show_emergency_contact', 'Show emergency contact info', 'Include emergency contact name/phone on printed rosters.'],
+    ['show_medical_info', 'Show medical info on rosters', 'Include each student\'s medical/allergy notes on printed rosters. Off by default — most classes don\'t need this printed.'],
+    ['hide_student_ages', 'Hide student ages', 'Hides age from printed rosters and class lists.'],
+    ['show_teacher_names', 'Show teacher names', 'Show the assigned instructor on the public schedule and printed rosters.'],
+  ]
+  return (
+    <>
+      <div className="page-head"><div><h1>Privacy Settings</h1><p>Controls what appears on printed rosters and shared views across the whole studio. This does not affect what staff can see on screen, only what gets shown on exports and printouts.</p></div></div>
+      <div className="card card-pad" style={{ maxWidth: 640 }}>
+        {ROWS.map(([key, label, help]) => (
+          <label key={key} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', padding: '12px 0', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!s[key]} onChange={() => toggle(key)} style={{ marginTop: 3 }} />
+            <span>
+              <span style={{ fontWeight: 500 }}>{label}</span>
+              <br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{help}</span>
+            </span>
+          </label>
+        ))}
+        <div style={{ marginTop: 18, display: 'flex', gap: 12, alignItems: 'center' }}>
+          <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
+          {saved && <span style={{ color: 'var(--ok)', fontSize: 14, fontWeight: 500 }}>{saved}</span>}
+        </div>
+      </div>
+    </>
+  )
+}
+
 const NAV = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'enrollments', label: 'Enrollments' },
   { key: 'attendance', label: 'Attendance' },
   { key: 'classes', label: 'Classes' },
+  { key: 'rooms', label: 'Rooms' },
   { key: 'students', label: 'Students' },
   { key: 'families', label: 'Families' },
   { key: 'teachers', label: 'Teachers' },
@@ -1007,6 +1276,8 @@ const NAV = [
   { key: 'team', label: 'Our Team' },
   { key: 'testimonials', label: 'Testimonials' },
   { key: 'announcements', label: 'Announcements' },
+  { key: 'privacy', label: 'Privacy Settings' },
+  { key: 'season', label: 'New Season' },
   { key: 'registrations', label: 'Registrations' },
 ]
 
@@ -1050,6 +1321,9 @@ export default function App() {
         {page === 'team' && <Team />}
         {page === 'testimonials' && <Testimonials />}
         {page === 'announcements' && <Announcements />}
+        {page === 'privacy' && <PrivacySettings />}
+        {page === 'season' && <SeasonRollover />}
+        {page === 'rooms' && <Rooms />}
         {page === 'registrations' && <Registrations onProcessed={refreshRegCount} />}
       </main>
     </div>

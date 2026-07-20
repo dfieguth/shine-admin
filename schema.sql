@@ -201,3 +201,57 @@ create policy "staff read student photos" on storage.objects for select using (b
 create policy "staff insert student photos" on storage.objects for insert with check (bucket_id = 'student-photos' and auth.role() = 'authenticated');
 create policy "staff update student photos" on storage.objects for update using (bucket_id = 'student-photos' and auth.role() = 'authenticated');
 create policy "staff delete student photos" on storage.objects for delete using (bucket_id = 'student-photos' and auth.role() = 'authenticated');
+-- Shine update 4: age range on classes + per-field privacy settings
+-- Reverse-engineered from Corrie's real Dance Studio Pro screenshots.
+-- Run ONCE in the Supabase SQL Editor.
+
+alter table classes add column if not exists min_age integer;
+alter table classes add column if not exists max_age integer;
+
+-- Studio-wide privacy toggles, matching DSP's "Roll Sheet Settings" panel.
+-- Single row table (one settings record for the whole studio).
+create table if not exists privacy_settings (
+  id integer primary key default 1,
+  hide_student_pictures boolean default true,
+  hide_parent_phone boolean default false,
+  show_emergency_contact boolean default true,
+  show_medical_info boolean default false,
+  hide_student_ages boolean default false,
+  show_teacher_names boolean default true,
+  constraint single_row check (id = 1)
+);
+insert into privacy_settings (id) values (1) on conflict (id) do nothing;
+alter table privacy_settings enable row level security;
+create policy "staff full access privacy" on privacy_settings for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+-- Shine update 5: seasons (yearly rollover)
+-- Answers "we redo classes every year" — a season is copied forward instead
+-- of being rebuilt by hand or re-imported from a spreadsheet each August.
+-- Run ONCE in the Supabase SQL Editor.
+
+alter table classes add column if not exists season text default '2025-2026';
+alter table students add column if not exists season_status text default 'active'; -- active | inactive | new
+-- Shine update 6: rooms, class room/teacher assignment, sorting & grouped email
+-- Run ONCE in the Supabase SQL Editor.
+
+create table if not exists rooms (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  capacity integer,
+  created_at timestamptz default now()
+);
+alter table rooms enable row level security;
+do $$ begin
+  create policy "staff full access rooms" on rooms for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create policy "public view rooms" on rooms for select using (true);
+exception when duplicate_object then null; end $$;
+
+-- classes gain a room reference (teacher already exists as instructor_name;
+-- we also add teacher_id to link to the teachers table for reliable grouping)
+alter table classes add column if not exists room_id uuid references rooms(id) on delete set null;
+alter table classes add column if not exists teacher_id uuid references teachers(id) on delete set null;
+
+-- seed the three real rooms from Corrie's DSP screenshot
+insert into rooms (name) values ('B21'), ('C25'), ('Small Room (B21)')
+on conflict do nothing;
