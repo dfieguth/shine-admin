@@ -180,7 +180,7 @@ function Classes() {
           <tbody>
             {visible.map((c) => (
               <tr key={c.id}>
-                <td data-label="Class"><strong>{c.name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{c.location}</span></td>
+                <td data-label="Class"><strong>{c.name}</strong></td>
                 <td data-label="Level">{c.level}{(c.min_age || c.max_age) && <><br /><span style={{ color: 'var(--ink-soft)', fontSize: 12.5 }}>Ages {c.min_age || '0'}{c.max_age ? `–${c.max_age}` : '+'}</span></>}</td>
                 <td data-label="When">{c.day_of_week}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{c.start_time}{c.end_time ? `–${c.end_time}` : ''}</span></td>
                 <td data-label="Room">{c.rooms?.name || '—'}</td>
