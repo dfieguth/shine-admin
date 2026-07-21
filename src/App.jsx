@@ -136,13 +136,32 @@ function Classes() {
     setEdit(null); load()
   }
   async function toggleActive(c) { await supabase.from('classes').update({ active: !c.active }).eq('id', c.id); load() }
+  const [confirmDelete, setConfirmDelete] = useState(null)
+  const [deleting, setDeleting] = useState(false)
+  async function openDeleteConfirm(c) {
+    const [{ count: enrollCount }, { data: enrIds }] = await Promise.all([
+      supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', c.id),
+      supabase.from('enrollments').select('id').eq('class_id', c.id),
+    ])
+    let attendanceCount = 0
+    if (enrIds && enrIds.length) {
+      const { count } = await supabase.from('attendance').select('id', { count: 'exact', head: true }).in('enrollment_id', enrIds.map((e) => e.id))
+      attendanceCount = count || 0
+    }
+    setConfirmDelete({ ...c, enrollCount: enrollCount || 0, attendanceCount })
+  }
+  async function doDelete() {
+    setDeleting(true)
+    await supabase.from('classes').delete().eq('id', confirmDelete.id)
+    setDeleting(false); setConfirmDelete(null); setEdit(null); load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   const allSeasons = [...new Set(rows.map((c) => c.season || 'unlabeled'))]
   const visible = seasonFilter ? rows.filter((c) => (c.season || 'unlabeled') === seasonFilter) : rows
   return (
     <>
       <div className="page-head">
-        <div><h1>Classes</h1><p>Add, edit, or retire a class. Retired classes disappear from the public schedule.</p></div>
+        <div><h1>Classes</h1><p>Add or edit a class. Retire pauses a class (and can be restored); delete removes it permanently, from the Edit screen.</p></div>
         <button className="btn" onClick={() => { setClsErr(''); setEdit({ ...BLANK_CLASS, season: seasonFilter || undefined }) }}>Add class</button>
       </div>
       {allSeasons.length > 1 && (
@@ -198,7 +217,38 @@ function Classes() {
             <Field label="Min age (optional)" type="number" value={edit.min_age ?? ''} onChange={(e) => setEdit({ ...edit, min_age: e.target.value })} placeholder="e.g. 7" />
             <Field label="Max age (optional)" type="number" value={edit.max_age ?? ''} onChange={(e) => setEdit({ ...edit, max_age: e.target.value })} placeholder="e.g. 9, blank = no max" />
           </div>
+          {edit.id && (
+            <div style={{ marginTop: 6, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+              <button className="btn danger small" onClick={() => openDeleteConfirm(edit)}>Delete this class permanently</button>
+              <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: 6 }}>
+                For a class pausing between seasons, use <strong>Retire</strong> instead (in the class list) — it can be restored later. Delete is only for classes that are truly done and won't come back.
+              </p>
+            </div>
+          )}
         </Modal>
+      )}
+      {confirmDelete && (
+        <div className="overlay" onClick={() => setConfirmDelete(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><h2>Delete "{confirmDelete.name}"?</h2></div>
+            <div className="modal-body">
+              <p style={{ fontSize: 14.5 }}>This permanently deletes the class and cannot be undone. It will also permanently erase:</p>
+              <ul style={{ margin: '10px 0 10px 20px', fontSize: 14.5 }}>
+                <li><strong>{confirmDelete.enrollCount}</strong> enrollment record{confirmDelete.enrollCount !== 1 ? 's' : ''} (current and past students in this class)</li>
+                <li><strong>{confirmDelete.attendanceCount}</strong> attendance record{confirmDelete.attendanceCount !== 1 ? 's' : ''} taken for this class</li>
+              </ul>
+              <p style={{ fontSize: 13.5, color: 'var(--ink-soft)' }}>
+                If this class might come back next season, click Cancel and use <strong>Retire</strong> instead — that keeps all of this history safe.
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setConfirmDelete(null)}>Cancel</button>
+              <button className="btn danger" onClick={doDelete} disabled={deleting} style={{ background: 'var(--danger)', color: '#fff', border: 'none' }}>
+                {deleting ? 'Deleting…' : 'Yes, permanently delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )
