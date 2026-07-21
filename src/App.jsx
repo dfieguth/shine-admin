@@ -480,6 +480,47 @@ function Enrollments() {
     </body></html>`)
     w.document.close(); w.focus(); w.print()
   }
+  async function printAllRosters() {
+    const { data: priv } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
+    const showAge = !priv?.hide_student_ages
+    const showEmg = !!priv?.show_emergency_contact
+    const dateCols = 8
+    const blank = '<td>&nbsp;</td>'.repeat(dateCols)
+    const activeClasses = classes.slice().sort((x, y) => (x.day_of_week || '').localeCompare(y.day_of_week || ''))
+    const sections = activeClasses.map((cls) => {
+      const enrolled = rows.filter((r) => r.class_id === cls.id && r.status === 'enrolled')
+      const waitlist = rows.filter((r) => r.class_id === cls.id && r.status === 'waitlist')
+      const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
+      const teacher = cls.teachers?.name || cls.instructor_name || ''
+      const room = cls.rooms?.name || cls.location || ''
+      return `<section class="cls">
+        <h1>${cls.name}${cls.level ? ` — ${cls.level}` : ''}</h1>
+        <p class="sub">${cls.day_of_week || ''} ${cls.start_time || ''}${cls.end_time ? `–${cls.end_time}` : ''}${teacher ? ` · ${teacher}` : ''}${room ? ` · ${room}` : ''}</p>
+        <p class="legend">Present: ✓ &nbsp; Tardy: T &nbsp; Absent: ○</p>
+        <table><tr><th></th><th>Student</th>${showAge ? '<th>Age</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${'<th>&nbsp;/&nbsp;</th>'.repeat(dateCols)}</tr>
+        ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${r.students?.grade || ''}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blank}</tr>`).join('')}
+        ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + (showAge ? '<td>&nbsp;</td>' : '') + (showEmg ? '<td>&nbsp;</td>' : '') + blank + '</tr>'.repeat(2)}
+        </table>
+        <p class="line">Class Mom: ______________________________</p>
+        ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
+      </section>`
+    }).join('')
+    const w = window.open('', '_blank')
+    w.document.write(`<!doctype html><html><head><title>All class rosters</title><style>
+      body{font-family:Georgia,serif;margin:24px;color:#222}
+      .cls{page-break-after:always}
+      .cls:last-child{page-break-after:auto}
+      h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 4px}
+      .legend{font-size:12px;margin:8px 0 12px}
+      table{width:100%;border-collapse:collapse;font-size:13px}
+      th,td{border:1px solid #999;padding:6px 8px;text-align:left;height:22px}
+      th{background:#eee;font-size:11px} td:first-child{width:26px;text-align:center;color:#777}
+      .wl{margin-top:14px;font-size:13px} .wl b{display:block;margin-bottom:4px}
+      .line{margin-top:14px;font-size:13px}
+      @media print { body{margin:10mm} }
+    </style></head><body>${sections}</body></html>`)
+    w.document.close(); w.focus(); w.print()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = filterClass ? rows.filter((r) => r.class_id === filterClass) : rows
   return (
@@ -518,6 +559,8 @@ function Enrollments() {
           </select>
         )}
         {groupBy && groupValue && <button className="btn" onClick={openGroupBroadcast}>Email this group</button>}
+        <div className="spacer" />
+        <button className="btn ghost small" onClick={printAllRosters}>Print all class rosters</button>
       </div>
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No enrollments here</h3><p>Enroll a student to get started.</p></div></div>
