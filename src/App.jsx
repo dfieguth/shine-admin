@@ -1306,6 +1306,38 @@ function PrivacySettings() {
   )
 }
 
+function Volunteers() {
+  const [rows, setRows] = useState(null)
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('volunteer_inquiries').select('*').eq('processed', false).order('submitted_date', { ascending: false })
+    setRows(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function markDone(id) { await supabase.from('volunteer_inquiries').update({ processed: true }).eq('id', id); load() }
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head"><div><h1>Volunteer Inquiries</h1><p>People who offered to help through the website's "Volunteer with us" button.</p></div></div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No new inquiries</h3><p>Volunteer offers from the website show up here.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Contact</th><th>How they'd help</th><th>When</th><th></th></tr></thead>
+          <tbody>{rows.map((v) => (
+            <tr key={v.id}>
+              <td data-label="Name"><strong>{v.name}</strong></td>
+              <td data-label="Contact">{v.email || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{v.phone}</span></td>
+              <td data-label="How they'd help">{v.message || '—'}</td>
+              <td data-label="When">{new Date(v.submitted_date).toLocaleDateString()}</td>
+              <td><div className="row-actions"><button className="btn ghost small" onClick={() => markDone(v.id)}>Mark handled</button></div></td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </>
+  )
+}
+
 const NAV = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'enrollments', label: 'Enrollments' },
@@ -1322,6 +1354,7 @@ const NAV = [
   { key: 'privacy', label: 'Privacy Settings' },
   { key: 'season', label: 'New Season' },
   { key: 'registrations', label: 'Registrations' },
+  { key: 'volunteers', label: 'Volunteers' },
 ]
 
 export default function App() {
@@ -1368,6 +1401,7 @@ export default function App() {
         {page === 'season' && <SeasonRollover />}
         {page === 'rooms' && <Rooms />}
         {page === 'registrations' && <Registrations onProcessed={refreshRegCount} />}
+        {page === 'volunteers' && <Volunteers />}
       </main>
     </div>
   )
