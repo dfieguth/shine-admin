@@ -809,17 +809,85 @@ function Enrollments() {
   )
 }
 
+// Enroll a student in every class named in the registration's
+// comma-joined interested_class text, auto-waitlisting any that are full.
+async function enrollInAllMatchedClasses(studentId, interestedClassText) {
+  if (!interestedClassText) return
+  const names = interestedClassText.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+  const { data: cls } = await supabase.from('classes').select('id, name, capacity').eq('active', true)
+  for (const wanted of names) {
+    const match = (cls || []).find((c) => wanted.includes(c.name.toLowerCase()) || c.name.toLowerCase().includes(wanted))
+    if (!match) continue
+    let status = 'enrolled'
+    if (match.capacity) {
+      const { count } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', match.id).eq('status', 'enrolled')
+      if ((count ?? 0) >= match.capacity) status = 'waitlist'
+    }
+    await supabase.from('enrollments').insert({ student_id: studentId, class_id: match.id, status })
+  }
+}
+
+function normPhone(p) { return (p || '').replace(/\D/g, '') }
+
+// Confidence-scored match search for "returning student" registrations.
+// HIGH = student name matches AND (a parent name, phone, or email also matches).
+// LOW  = only the student's name matches — could easily be a different kid.
+async function findReturningMatches(r) {
+  const [sFirst, ...sRest] = (r.student_name || '').trim().split(' ')
+  const sLast = sRest.join(' ')
+  if (!sFirst) return []
+  let q = supabase.from('students').select('*, families(*)').ilike('first_name', sFirst)
+  if (sLast) q = q.ilike('last_name', `%${sLast}%`)
+  const { data: candidates } = await q
+  if (!candidates || !candidates.length) return []
+
+  const regPhones = [normPhone(r.phone), normPhone(r.secondary_parent_phone)].filter(Boolean)
+  const regEmails = [(r.email || '').toLowerCase().trim(), (r.secondary_parent_email || '').toLowerCase().trim()].filter(Boolean)
+  const regParentNames = [(r.parent_name || '').toLowerCase().trim(), (r.secondary_parent_name || '').toLowerCase().trim()].filter(Boolean)
+
+  return candidates.map((c) => {
+    const fam = c.families
+    let confidence = 'low'
+    if (fam) {
+      const famNames = [`${fam.parent_first_name} ${fam.parent_last_name}`.toLowerCase().trim(), (fam.secondary_parent_name || '').toLowerCase().trim()].filter(Boolean)
+      const famPhones = [normPhone(fam.phone), normPhone(fam.secondary_parent_phone)].filter(Boolean)
+      const famEmails = [(fam.email || '').toLowerCase().trim(), (fam.secondary_parent_email || '').toLowerCase().trim()].filter(Boolean)
+      const nameHit = famNames.some((n) => regParentNames.includes(n))
+      const phoneHit = regPhones.some((p) => famPhones.includes(p))
+      const emailHit = regEmails.some((e) => famEmails.includes(e))
+      if (nameHit || phoneHit || emailHit) confidence = 'high'
+    }
+    return { student: c, family: fam, confidence }
+  }).sort((a, b) => (a.confidence === 'high' ? -1 : 1) - (b.confidence === 'high' ? -1 : 1))
+}
+
 function Registrations({ onProcessed }) {
   const [rows, setRows] = useState(null)
   const [processing, setProcessing] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [matches, setMatches] = useState([])
+  const [matchesLoaded, setMatchesLoaded] = useState(false)
+  const [selectedMatchId, setSelectedMatchId] = useState('new')
   const load = useCallback(async () => {
     const { data } = await supabase.from('registrations').select('*').eq('processed', false).order('submitted_date', { ascending: false })
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
-  async function process(r) {
-    setBusy(true)
+
+  async function openProcessing(r) {
+    setProcessing(r); setMatches([]); setMatchesLoaded(false); setSelectedMatchId('new')
+    if (r.is_returning) {
+      const found = await findReturningMatches(r)
+      setMatches(found)
+      // Pre-select the top match only if it's high confidence — never
+      // pre-select a low-confidence guess, that decision stays with Corrie.
+      setSelectedMatchId(found.length && found[0].confidence === 'high' ? found[0].student.id : 'new')
+    }
+    setMatchesLoaded(true)
+  }
+
+  // Create a brand-new family + student (today's original behavior).
+  async function createNew(r) {
     const [firstName, ...rest] = (r.parent_name || '').trim().split(' ')
     const { data: fam } = await supabase.from('families').insert({
       parent_first_name: firstName || r.parent_name, parent_last_name: rest.join(' ') || '', email: r.email, phone: r.phone,
@@ -841,17 +909,35 @@ function Registrations({ onProcessed }) {
       birthday: r.student_birthday || null, family_id: fam?.id || null,
       notes: meetingNote ? `Parent meeting selected at registration: ${meetingNote}.` : null,
     }).select().single()
-    if (r.interested_class && stu) {
-      const { data: cls } = await supabase.from('classes').select('id, name, capacity').eq('active', true)
-      const match = (cls || []).find((c) => r.interested_class.toLowerCase().includes(c.name.toLowerCase()))
-      if (match) {
-        let status = 'enrolled'
-        if (match.capacity) {
-          const { count } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', match.id).eq('status', 'enrolled')
-          if ((count ?? 0) >= match.capacity) status = 'waitlist'
-        }
-        await supabase.from('enrollments').insert({ student_id: stu.id, class_id: match.id, status })
-      }
+    if (stu) await enrollInAllMatchedClasses(stu.id, r.interested_class)
+  }
+
+  // Reuse an existing student + family Corrie confirmed is the same person.
+  // Only fills in BLANK fields — never overwrites data already on file.
+  async function mergeIntoExisting(match, r) {
+    const { student: stu, family: fam } = match
+    if (fam) {
+      const famUpdate = {}
+      if (!fam.secondary_parent_name && r.secondary_parent_name) famUpdate.secondary_parent_name = r.secondary_parent_name
+      if (!fam.secondary_parent_email && r.secondary_parent_email) famUpdate.secondary_parent_email = r.secondary_parent_email
+      if (!fam.secondary_parent_phone && r.secondary_parent_phone) famUpdate.secondary_parent_phone = r.secondary_parent_phone
+      if (!fam.emergency_contact_name && r.emergency_contact_name) famUpdate.emergency_contact_name = r.emergency_contact_name
+      if (!fam.emergency_contact_relationship && r.emergency_contact_relationship) famUpdate.emergency_contact_relationship = r.emergency_contact_relationship
+      if (!fam.emergency_contact_phone && r.emergency_contact_phone) famUpdate.emergency_contact_phone = r.emergency_contact_phone
+      if (Object.keys(famUpdate).length) await supabase.from('families').update(famUpdate).eq('id', fam.id)
+    }
+    if (!stu.birthday && r.student_birthday) await supabase.from('students').update({ birthday: r.student_birthday }).eq('id', stu.id)
+    await enrollInAllMatchedClasses(stu.id, r.interested_class)
+  }
+
+  async function process(r) {
+    setBusy(true)
+    if (selectedMatchId !== 'new') {
+      const match = matches.find((m) => m.student.id === selectedMatchId)
+      if (match) await mergeIntoExisting(match, r)
+      else await createNew(r)
+    } else {
+      await createNew(r)
     }
     await supabase.from('registrations').update({ processed: true }).eq('id', r.id)
     setBusy(false); setProcessing(null); load(); onProcessed && onProcessed()
@@ -870,7 +956,7 @@ function Registrations({ onProcessed }) {
             {rows.map((r) => (
               <tr key={r.id}>
                 <td data-label="Parent"><strong>{r.parent_name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.email} {r.phone}</span></td>
-                <td data-label="Student">{r.student_name}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.student_grade}</span></td>
+                <td data-label="Student">{r.student_name}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.student_grade}</span><br /><span className={`pill ${r.is_returning ? 'waitlist' : 'enrolled'}`} style={{ marginTop: 3, display: 'inline-block' }}>{r.is_returning ? 'Returning' : 'New'}</span></td>
                 <td data-label="Interest">{r.interested_class || '—'}</td>
                 <td data-label="Meeting">
                   {r.meeting_aug28 && <span className="pill enrolled" style={{ marginRight: 4 }}>Aug 28</span>}
@@ -880,7 +966,7 @@ function Registrations({ onProcessed }) {
                 </td>
                 <td data-label="Submitted">{new Date(r.submitted_date).toLocaleDateString()}</td>
                 <td><div className="row-actions">
-                  <button className="btn small" onClick={() => setProcessing(r)}>Add to roster</button>
+                  <button className="btn small" onClick={() => openProcessing(r)}>Add to roster</button>
                   <button className="btn ghost small" onClick={() => dismiss(r.id)}>Dismiss</button>
                 </div></td>
               </tr>
@@ -889,19 +975,48 @@ function Registrations({ onProcessed }) {
         </table></div>
       )}
       {processing && (
-        <Modal title="Add to roster" onClose={() => setProcessing(null)} onSave={() => process(processing)} saving={busy} saveLabel="Create records">
-          <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>
-            This creates a family and a student from <strong>{processing.parent_name}</strong>'s registration
-            {processing.interested_class ? <> and tries to enroll them in a class matching "<strong>{processing.interested_class}</strong>."</> : '.'}
-            {' '}You can fine-tune the details afterward on the Families and Students screens.
-          </p>
-          <div style={{ background: 'var(--cream)', borderRadius: 8, padding: 12, fontSize: 13.5, marginTop: 4 }}>
-            <div><strong>Dancer:</strong> {processing.student_name} {processing.student_birthday && `· born ${processing.student_birthday}`}</div>
-            {processing.secondary_parent_name && <div><strong>2nd parent:</strong> {processing.secondary_parent_name} {processing.secondary_parent_phone}</div>}
-            {processing.emergency_contact_name && <div><strong>Emergency contact:</strong> {processing.emergency_contact_name} ({processing.emergency_contact_relationship}) {processing.emergency_contact_phone}</div>}
-            <div><strong>Parent meeting:</strong> {[processing.meeting_aug28 && 'Aug 28', processing.meeting_sep3 && 'Sep 3'].filter(Boolean).join(', ') || 'none selected'}</div>
-            {processing.wants_donation && <div><strong>💛 Interested in a registration donation</strong> <span style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>(checked the box at signup — this only means they clicked, not that a payment was completed)</span></div>}
-          </div>
+        <Modal title="Add to roster" onClose={() => setProcessing(null)} onSave={() => process(processing)} saving={busy} saveLabel={selectedMatchId !== 'new' ? 'Enroll in existing record' : 'Create records'}>
+          {!matchesLoaded ? (
+            <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>Checking for an existing match…</p>
+          ) : (
+            <>
+              {processing.is_returning && matches.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <p style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>Marked as a returning student — possible matches found:</p>
+                  {matches.map((m) => (
+                    <label key={m.student.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 8, cursor: 'pointer', background: selectedMatchId === m.student.id ? 'var(--pine-soft, #e8f0ec)' : 'transparent' }}>
+                      <input type="radio" name="match" checked={selectedMatchId === m.student.id} onChange={() => setSelectedMatchId(m.student.id)} style={{ marginTop: 3 }} />
+                      <span style={{ fontSize: 14 }}>
+                        <strong>{m.student.first_name} {m.student.last_name}</strong>
+                        {m.family && <> — {m.family.parent_first_name} {m.family.parent_last_name}</>}
+                        <br />
+                        <span className={`pill ${m.confidence === 'high' ? 'enrolled' : 'waitlist'}`}>{m.confidence === 'high' ? 'High confidence' : 'Low confidence — name only'}</span>
+                      </span>
+                    </label>
+                  ))}
+                  <label style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 8, cursor: 'pointer', background: selectedMatchId === 'new' ? 'var(--pine-soft, #e8f0ec)' : 'transparent' }}>
+                    <input type="radio" name="match" checked={selectedMatchId === 'new'} onChange={() => setSelectedMatchId('new')} />
+                    <span style={{ fontSize: 14 }}>None of these — create a new student</span>
+                  </label>
+                </div>
+              )}
+              {processing.is_returning && matches.length === 0 && (
+                <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', marginBottom: 14 }}>Marked as returning, but no existing student with this name was found — this will create a new record.</p>
+              )}
+              <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>
+                {selectedMatchId !== 'new'
+                  ? <>This will enroll the <strong>existing</strong> student in {processing.interested_class ? <>every class matching "<strong>{processing.interested_class}</strong>."</> : 'the selected class(es).'} No new family or student record will be created — only blank fields (like a missing birthday or emergency contact) get filled in.</>
+                  : <>This creates a new family and student from <strong>{processing.parent_name}</strong>'s registration{processing.interested_class ? <> and enrolls them in every class matching "<strong>{processing.interested_class}</strong>."</> : '.'} You can fine-tune details afterward on the Families and Students screens.</>}
+              </p>
+              <div style={{ background: 'var(--cream)', borderRadius: 8, padding: 12, fontSize: 13.5, marginTop: 4 }}>
+                <div><strong>Dancer:</strong> {processing.student_name} {processing.student_birthday && `· born ${processing.student_birthday}`}</div>
+                {processing.secondary_parent_name && <div><strong>2nd parent:</strong> {processing.secondary_parent_name} {processing.secondary_parent_phone}</div>}
+                {processing.emergency_contact_name && <div><strong>Emergency contact:</strong> {processing.emergency_contact_name} ({processing.emergency_contact_relationship}) {processing.emergency_contact_phone}</div>}
+                <div><strong>Parent meeting:</strong> {[processing.meeting_aug28 && 'Aug 28', processing.meeting_sep3 && 'Sep 3'].filter(Boolean).join(', ') || 'none selected'}</div>
+                {processing.wants_donation && <div><strong>💛 Interested in a registration donation</strong> <span style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>(checked the box at signup — this only means they clicked, not that a payment was completed)</span></div>}
+              </div>
+            </>
+          )}
         </Modal>
       )}
     </>
@@ -963,7 +1078,7 @@ function Teachers() {
   )
 }
 
-function Attendance() {
+function Attendance({ myTeacherId }) {
   const [classes, setClasses] = useState([])
   const [classId, setClassId] = useState('')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
@@ -973,10 +1088,12 @@ function Attendance() {
 
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from('classes').select('id, name, day_of_week').eq('active', true).order('name')
+      let q = supabase.from('classes').select('id, name, day_of_week').eq('active', true).order('name')
+      if (myTeacherId) q = q.eq('teacher_id', myTeacherId)
+      const { data } = await q
       setClasses(data || [])
     })()
-  }, [])
+  }, [myTeacherId])
 
   const loadRoster = useCallback(async () => {
     if (!classId || !date) { setRoster(null); return }
@@ -1331,6 +1448,43 @@ function Testimonials() {
   )
 }
 
+// A safe, READ-ONLY view of a teacher's own classes — no edit, delete, or
+// reassignment controls. This is what "My Classes" grants, distinct from
+// the full admin "Classes" screen which can edit/delete ANY class.
+function MyClasses({ myTeacherId }) {
+  const [classes, setClasses] = useState(null)
+  useEffect(() => {
+    (async () => {
+      let q = supabase.from('classes').select('*, rooms(name)').eq('active', true).order('day_of_week')
+      if (myTeacherId) q = q.eq('teacher_id', myTeacherId)
+      const { data } = await q
+      setClasses(data || [])
+    })()
+  }, [myTeacherId])
+  if (!classes) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head"><div><h1>My Classes</h1><p>Your classes this season — for reference. Ask Corrie if anything needs to change.</p></div></div>
+      {!myTeacherId && <div className="card card-pad" style={{ marginBottom: 16 }}><p style={{ fontSize: 14 }}>Your login isn't linked to a teacher profile yet, so this shows every active class. Ask Corrie to link your account in Teacher Access for a scoped view.</p></div>}
+      {classes.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No classes assigned yet</h3><p>Check back once Corrie assigns you a class.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Class</th><th>Level</th><th>When</th><th>Room</th></tr></thead>
+          <tbody>{classes.map((c) => (
+            <tr key={c.id}>
+              <td data-label="Class"><strong>{c.name}</strong></td>
+              <td data-label="Level">{c.level || '—'}</td>
+              <td data-label="When">{c.day_of_week} {c.start_time}{c.end_time ? `–${c.end_time}` : ''}</td>
+              <td data-label="Room">{c.rooms?.name || '—'}</td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </>
+  )
+}
+
 function currentSeasonLabel() {
   // Shine's season runs roughly Aug-May. Aug or later = "this year-next year".
   const now = new Date()
@@ -1384,6 +1538,116 @@ function Rooms() {
         <Modal title={edit.id ? 'Edit room' : 'Add room'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
           <Field label="Room name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="B21" />
           <Field label="Capacity (optional)" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} />
+        </Modal>
+      )}
+    </>
+  )
+}
+
+// Every screen a teacher account could ever be granted, with a plain-
+// language note on what it actually exposes. Screens NOT in this list can
+// never be granted to a teacher, no matter what — that's a hard safelist,
+// not just a UI suggestion, enforced again when the nav actually renders.
+const TEACHER_GRANTABLE = [
+  { key: 'attendance', label: 'Attendance', note: 'Take attendance — automatically scoped to their own class(es) once linked to a teacher profile below.' },
+  { key: 'my-classes', label: 'My Classes (view only)', note: 'See their own class schedule. Cannot edit anything. Safe default.' },
+  { key: 'classes', label: 'Classes (full management)', note: '⚠ Powerful: can add, edit, retire, or delete ANY class — not just their own.' },
+  { key: 'enrollments', label: 'Enrollments', note: '⚠ Can move/waitlist/drop students in any class, and see class rosters.' },
+  { key: 'students', label: 'Students (full roster)', note: '⚠ Sees every student, including medical/allergy notes.' },
+  { key: 'rooms', label: 'Rooms', note: 'Low risk — just room names and capacities.' },
+  { key: 'teachers', label: 'Teacher roster', note: 'Low risk — teacher contact info.' },
+  { key: 'photos', label: 'Photos', note: 'Low risk — manage public site photos.' },
+  { key: 'team', label: 'Our Team', note: 'Low risk — manage public bios.' },
+  { key: 'testimonials', label: 'Testimonials', note: 'Low risk — manage public quotes.' },
+  { key: 'announcements', label: 'Announcements', note: 'Low risk — post public banners.' },
+]
+// Families, Registrations, and Volunteer Inquiries are never offered here —
+// they're blocked for teacher logins at the DATABASE level (see migration-9),
+// so granting them in this screen would do nothing but show empty tables.
+
+function TeacherAccess() {
+  const [rows, setRows] = useState(null)
+  const [teachers, setTeachers] = useState([])
+  const [edit, setEdit] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const load = useCallback(async () => {
+    const [sr, t] = await Promise.all([
+      supabase.from('staff_roles').select('*, teachers(name)').order('created_at'),
+      supabase.from('teachers').select('id, name').order('name'),
+    ])
+    setRows(sr.data || []); setTeachers(t.data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  async function save() {
+    setSaving(true)
+    const payload = { role: edit.role, teacher_id: edit.teacher_id || null, allowed_screens: edit.allowed_screens, display_name: edit.display_name || null, email: edit.email || null }
+    if (edit.isNew) await supabase.from('staff_roles').insert({ user_id: edit.user_id, ...payload })
+    else await supabase.from('staff_roles').update(payload).eq('user_id', edit.user_id)
+    setSaving(false); setEdit(null); load()
+  }
+  async function remove(userId) {
+    await supabase.from('staff_roles').delete().eq('user_id', userId); load()
+  }
+  function toggleScreen(key) {
+    setEdit((e) => ({ ...e, allowed_screens: e.allowed_screens.includes(key) ? e.allowed_screens.filter((k) => k !== key) : [...e.allowed_screens, key] }))
+  }
+
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head">
+        <div><h1>Teacher Access</h1><p>Control exactly which screens each teacher login can see. Creating the actual login (email + password) is still done once in Supabase — this just controls what they see after they sign in.</p></div>
+        <button className="btn" onClick={() => setEdit({ isNew: true, user_id: '', role: 'teacher', teacher_id: '', allowed_screens: ['attendance', 'my-classes'], display_name: '', email: '' })}>Add teacher login</button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No limited logins yet</h3><p>Anyone who logs in without a row here gets full admin access. Add a row to create a restricted teacher login.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Role</th><th>Linked teacher</th><th>Can see</th><th></th></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.user_id}>
+              <td data-label="Name"><strong>{r.display_name || '(unnamed)'}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.email}</span></td>
+              <td data-label="Role"><span className={`pill ${r.role === 'admin' ? 'enrolled' : 'waitlist'}`}>{r.role}</span></td>
+              <td data-label="Linked teacher">{r.teachers?.name || '—'}</td>
+              <td data-label="Can see" style={{ fontSize: 13 }}>{(r.allowed_screens || []).join(', ') || '—'}</td>
+              <td><div className="row-actions">
+                <button className="btn ghost small" onClick={() => setEdit({ ...r, isNew: false, allowed_screens: r.allowed_screens || [] })}>Edit</button>
+                <button className="btn danger small" onClick={() => remove(r.user_id)}>Remove</button>
+              </div></td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+      {edit && (
+        <Modal title={edit.isNew ? 'Add teacher login' : 'Edit access'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+          {edit.isNew && (
+            <>
+              <Field label="User ID" value={edit.user_id} onChange={(e) => setEdit({ ...edit, user_id: e.target.value })} placeholder="Paste the UUID from Supabase → Authentication → Users" />
+              <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -8 }}>Create the login itself in Supabase first (Authentication → Users → Add user), then paste their User UID here.</p>
+            </>
+          )}
+          <div className="field row2">
+            <Field label="Display name (for your reference)" value={edit.display_name || ''} onChange={(e) => setEdit({ ...edit, display_name: e.target.value })} placeholder="Serena" />
+            <Field label="Email (for your reference)" value={edit.email || ''} onChange={(e) => setEdit({ ...edit, email: e.target.value })} />
+          </div>
+          <div className="field row2">
+            <Field label="Role" value={edit.role} options={[{ value: 'teacher', label: 'Teacher (limited)' }, { value: 'admin', label: 'Admin (full access)' }]} onChange={(e) => setEdit({ ...edit, role: e.target.value })} />
+            <Field label="Linked teacher profile" value={edit.teacher_id || ''} options={[{ value: '', label: '— none —' }, ...teachers.map((t) => ({ value: t.id, label: t.name }))]} onChange={(e) => setEdit({ ...edit, teacher_id: e.target.value })} />
+          </div>
+          {edit.role === 'admin' ? (
+            <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', background: 'var(--cream)', padding: 10, borderRadius: 8 }}>Admin role sees everything — screen selections below don't apply.</p>
+          ) : (
+            <>
+              <p style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Screens this teacher can see:</p>
+              {TEACHER_GRANTABLE.map((s) => (
+                <label key={s.key} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 0', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={edit.allowed_screens.includes(s.key)} onChange={() => toggleScreen(s.key)} style={{ marginTop: 3 }} />
+                  <span><span style={{ fontWeight: 500 }}>{s.label}</span><br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>{s.note}</span></span>
+                </label>
+              ))}
+            </>
+          )}
         </Modal>
       )}
     </>
@@ -1563,11 +1827,13 @@ const NAV = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'enrollments', label: 'Enrollments' },
   { key: 'attendance', label: 'Attendance' },
+  { key: 'my-classes', label: 'My Classes' },
   { key: 'classes', label: 'Classes' },
   { key: 'rooms', label: 'Rooms' },
   { key: 'students', label: 'Students' },
   { key: 'families', label: 'Families' },
   { key: 'teachers', label: 'Teachers' },
+  { key: 'teacher-access', label: 'Teacher Access' },
   { key: 'photos', label: 'Photos' },
   { key: 'team', label: 'Our Team' },
   { key: 'testimonials', label: 'Testimonials' },
@@ -1578,16 +1844,19 @@ const NAV = [
   { key: 'volunteers', label: 'Volunteers' },
 ]
 
-// Screens a limited "teacher" login may use. Everything else is admin-only
-// and is ALSO blocked at the database level (see migration-9.sql) — hiding
-// nav items alone would not be real security.
-const TEACHER_ALLOWED = ['attendance', 'classes']
+// Hard safelist: no matter what Corrie checks in Teacher Access, a teacher
+// login can NEVER see anything outside this list. This is enforced here in
+// code, not just as a UI suggestion — it's the backstop if a bad value ever
+// ends up in the database.
+const TEACHER_MAX_GRANTABLE = ['attendance', 'my-classes', 'classes', 'enrollments', 'students', 'rooms', 'teachers', 'photos', 'team', 'testimonials', 'announcements']
 
 export default function App() {
   const [session, setSession] = useState(undefined)
   const [page, setPage] = useState('dashboard')
   const [newRegCount, setNewRegCount] = useState(0)
   const [isTeacher, setIsTeacher] = useState(false)
+  const [myTeacherId, setMyTeacherId] = useState(null)
+  const [allowedScreens, setAllowedScreens] = useState([])
   const [roleLoaded, setRoleLoaded] = useState(false)
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session))
@@ -1597,11 +1866,14 @@ export default function App() {
   useEffect(() => {
     if (!session) { setRoleLoaded(false); return }
     ;(async () => {
-      const { data } = await supabase.from('staff_roles').select('role').eq('user_id', session.user.id).maybeSingle()
+      const { data } = await supabase.from('staff_roles').select('role, teacher_id, allowed_screens').eq('user_id', session.user.id).maybeSingle()
       const teacher = data?.role === 'teacher'
       setIsTeacher(teacher)
+      setMyTeacherId(data?.teacher_id || null)
+      const granted = (data?.allowed_screens || ['attendance']).filter((k) => TEACHER_MAX_GRANTABLE.includes(k))
+      setAllowedScreens(granted.length ? granted : ['attendance'])
       setRoleLoaded(true)
-      if (teacher) setPage('attendance')
+      if (teacher) setPage(granted.includes('attendance') ? 'attendance' : (granted[0] || 'attendance'))
     })()
   }, [session])
   const refreshRegCount = useCallback(async () => {
@@ -1613,8 +1885,8 @@ export default function App() {
   if (session === undefined) return <div className="loading">Loading…</div>
   if (!session) return <AuthScreen />
   if (!roleLoaded) return <div className="loading">Loading…</div>
-  const visibleNav = isTeacher ? NAV.filter((n) => TEACHER_ALLOWED.includes(n.key)) : NAV
-  const safePage = isTeacher && !TEACHER_ALLOWED.includes(page) ? 'attendance' : page
+  const visibleNav = isTeacher ? NAV.filter((n) => allowedScreens.includes(n.key)) : NAV.filter((n) => n.key !== 'my-classes')
+  const safePage = isTeacher && !allowedScreens.includes(page) ? (allowedScreens[0] || 'attendance') : page
   return (
     <div className="app">
       <nav className="sidebar">
@@ -1628,22 +1900,24 @@ export default function App() {
         <button className="navlink signout" onClick={() => supabase.auth.signOut()}>Sign out</button>
       </nav>
       <main className="main">
-        {safePage === 'dashboard' && <Dashboard go={setPage} />}
+        {safePage === 'dashboard' && !isTeacher && <Dashboard go={setPage} />}
         {safePage === 'enrollments' && <Enrollments />}
-        {safePage === 'attendance' && <Attendance />}
+        {safePage === 'attendance' && <Attendance myTeacherId={isTeacher ? myTeacherId : null} />}
+        {safePage === 'my-classes' && <MyClasses myTeacherId={myTeacherId} />}
         {safePage === 'classes' && <Classes />}
         {safePage === 'students' && <Students />}
-        {safePage === 'families' && <Families />}
+        {safePage === 'families' && !isTeacher && <Families />}
         {safePage === 'teachers' && <Teachers />}
         {safePage === 'photos' && <Photos />}
         {safePage === 'team' && <Team />}
         {safePage === 'testimonials' && <Testimonials />}
         {safePage === 'announcements' && <Announcements />}
-        {safePage === 'privacy' && <PrivacySettings />}
-        {safePage === 'season' && <SeasonRollover />}
+        {safePage === 'privacy' && !isTeacher && <PrivacySettings />}
+        {safePage === 'season' && !isTeacher && <SeasonRollover />}
         {safePage === 'rooms' && <Rooms />}
-        {safePage === 'registrations' && <Registrations onProcessed={refreshRegCount} />}
-        {safePage === 'volunteers' && <Volunteers />}
+        {safePage === 'registrations' && !isTeacher && <Registrations onProcessed={refreshRegCount} />}
+        {safePage === 'volunteers' && !isTeacher && <Volunteers />}
+        {safePage === 'teacher-access' && !isTeacher && <TeacherAccess />}
       </main>
     </div>
   )
