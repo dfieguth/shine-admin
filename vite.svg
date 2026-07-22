@@ -876,7 +876,7 @@ function Registrations({ onProcessed }) {
                   {r.meeting_aug28 && <span className="pill enrolled" style={{ marginRight: 4 }}>Aug 28</span>}
                   {r.meeting_sep3 && <span className="pill enrolled">Sep 3</span>}
                   {!r.meeting_aug28 && !r.meeting_sep3 && '—'}
-                  {r.wants_donation && <><br /><span className="pill waitlist" style={{ marginTop: 4, display: 'inline-block' }}>$100 donation</span></>}
+                  {r.wants_donation && <><br /><span className="pill waitlist" style={{ marginTop: 4, display: 'inline-block' }} title="Checked the donation interest box at registration — this does not confirm a payment was made.">Donation interest</span></>}
                 </td>
                 <td data-label="Submitted">{new Date(r.submitted_date).toLocaleDateString()}</td>
                 <td><div className="row-actions">
@@ -900,7 +900,7 @@ function Registrations({ onProcessed }) {
             {processing.secondary_parent_name && <div><strong>2nd parent:</strong> {processing.secondary_parent_name} {processing.secondary_parent_phone}</div>}
             {processing.emergency_contact_name && <div><strong>Emergency contact:</strong> {processing.emergency_contact_name} ({processing.emergency_contact_relationship}) {processing.emergency_contact_phone}</div>}
             <div><strong>Parent meeting:</strong> {[processing.meeting_aug28 && 'Aug 28', processing.meeting_sep3 && 'Sep 3'].filter(Boolean).join(', ') || 'none selected'}</div>
-            {processing.wants_donation && <div><strong>💛 Wants to make the $100 registration donation</strong></div>}
+            {processing.wants_donation && <div><strong>💛 Interested in a registration donation</strong> <span style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>(checked the box at signup — this only means they clicked, not that a payment was completed)</span></div>}
           </div>
         </Modal>
       )}
