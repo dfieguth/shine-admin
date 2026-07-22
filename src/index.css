@@ -181,3 +181,9 @@ textarea { resize: vertical; min-height: 60px; }
   tbody td::before { content: attr(data-label); display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-soft); }
   .row-actions { justify-content: flex-start; padding-top: 6px; }
 }
+
+/* Student "View" profile modal */
+.view-profile .vp-row{display:flex;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+.view-profile .vp-row span:first-child{color:var(--ink-soft);flex-shrink:0}
+.view-profile .vp-row span:last-child{text-align:right}
+.view-profile .vp-section{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--brass-dark, #a3741f);font-weight:600;margin:16px 0 4px}

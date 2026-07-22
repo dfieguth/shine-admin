@@ -327,12 +327,22 @@ function Students() {
   const [q, setQ] = useState('')
   const [photoUrls, setPhotoUrls] = useState({})
   const [busyPhoto, setBusyPhoto] = useState('')
+  const [viewing, setViewing] = useState(null)
+  const [enrollMap, setEnrollMap] = useState({})
   const load = useCallback(async () => {
-    const [s, f] = await Promise.all([
-      supabase.from('students').select('*, families(parent_first_name, parent_last_name)').order('last_name'),
+    const [s, f, enr] = await Promise.all([
+      supabase.from('students').select('*, families(*)').order('last_name'),
       supabase.from('families').select('id, parent_first_name, parent_last_name').order('parent_last_name'),
+      supabase.from('enrollments').select('student_id, status, classes(name)').eq('status', 'enrolled'),
     ])
     setRows(s.data || []); setFamilies(f.data || [])
+    const em = {}
+    for (const e of enr.data || []) {
+      if (!e.classes) continue
+      if (!em[e.student_id]) em[e.student_id] = []
+      em[e.student_id].push(e.classes.name)
+    }
+    setEnrollMap(em)
     // Student photos live in a PRIVATE bucket; signed URLs are staff-only and expire.
     const paths = (s.data || []).map((r) => r.photo_path).filter(Boolean)
     if (paths.length) {
@@ -377,7 +387,7 @@ function Students() {
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Student</th><th>Grade</th><th>Level</th><th>Family</th><th></th></tr></thead>
+          <thead><tr><th>Student</th><th>Grade</th><th>Level</th><th>Classes</th><th>Family</th><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
@@ -391,12 +401,14 @@ function Students() {
                 </td>
                 <td data-label="Grade">{s.grade || '—'}</td>
                 <td data-label="Level">{s.level || '—'}</td>
+                <td data-label="Classes" style={{ fontSize: 13 }}>{(enrollMap[s.id] || []).length ? enrollMap[s.id].join(', ') : <span style={{ color: 'var(--ink-soft)' }}>—</span>}</td>
                 <td data-label="Family">{s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : '—'}</td>
                 <td><div className="row-actions">
                   <label className="btn ghost small" style={{ cursor: 'pointer' }}>
                     {busyPhoto === s.id ? 'Uploading…' : 'Photo'}
                     <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => uploadPhoto(s, e)} />
                   </label>
+                  <button className="btn ghost small" onClick={() => setViewing(s)}>View</button>
                   <button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button>
                 </div></td>
               </tr>
@@ -415,10 +427,58 @@ function Students() {
             <Field label="Grade" value={edit.grade || ''} onChange={(e) => setEdit({ ...edit, grade: e.target.value })} placeholder="e.g. 4th" />
             <Field label="Level" value={edit.level} options={LEVELS} onChange={(e) => setEdit({ ...edit, level: e.target.value })} />
           </div>
-          <Field label="Family" value={edit.family_id || ''} options={famOptions} onChange={(e) => setEdit({ ...edit, family_id: e.target.value })} />
+          <div className="field row2">
+            <Field label="Birthday" type="date" value={edit.birthday || ''} onChange={(e) => setEdit({ ...edit, birthday: e.target.value })} />
+            <Field label="Family" value={edit.family_id || ''} options={famOptions} onChange={(e) => setEdit({ ...edit, family_id: e.target.value })} />
+          </div>
           <Field label="Medical / allergies (staff only)" textarea value={edit.medical_notes || ''} onChange={(e) => setEdit({ ...edit, medical_notes: e.target.value })} placeholder="Allergies, conditions, medications leaders should know about" />
           <Field label="Notes" textarea value={edit.notes || ''} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} />
         </Modal>
+      )}
+      {viewing && (
+        <div className="overlay" onClick={() => setViewing(null)}>
+          <div className="modal" style={{ maxWidth: 520 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {viewing.photo_path && photoUrls[viewing.photo_path]
+                ? <img src={photoUrls[viewing.photo_path]} alt="" style={{ width: 48, height: 48, borderRadius: '50%', objectFit: 'cover' }} />
+                : <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'var(--pine-soft)', display: 'grid', placeItems: 'center', color: 'var(--pine)', fontWeight: 600 }}>{(viewing.first_name || '?')[0]}{(viewing.last_name || '')[0] || ''}</div>}
+              <h2 style={{ marginBottom: 0 }}>{viewing.first_name} {viewing.last_name}</h2>
+            </div>
+            <div className="modal-body view-profile">
+              <div className="vp-row"><span>Grade</span><span>{viewing.grade || '—'}</span></div>
+              <div className="vp-row"><span>Level</span><span>{viewing.level || '—'}</span></div>
+              <div className="vp-row"><span>Birthday</span><span>{viewing.birthday || '—'}</span></div>
+              <div className="vp-row"><span>Classes</span><span>{(enrollMap[viewing.id] || []).join(', ') || '—'}</span></div>
+
+              <p className="vp-section">Family</p>
+              {viewing.families ? (
+                <>
+                  <div className="vp-row"><span>Primary parent</span><span>{viewing.families.parent_first_name} {viewing.families.parent_last_name}</span></div>
+                  <div className="vp-row"><span>Email</span><span>{viewing.families.email || '—'}</span></div>
+                  <div className="vp-row"><span>Phone</span><span>{viewing.families.phone || '—'}</span></div>
+                  {viewing.families.secondary_parent_name && (
+                    <>
+                      <div className="vp-row"><span>2nd parent</span><span>{viewing.families.secondary_parent_name}</span></div>
+                      <div className="vp-row"><span>2nd parent contact</span><span>{viewing.families.secondary_parent_email} {viewing.families.secondary_parent_phone}</span></div>
+                    </>
+                  )}
+                  <div className="vp-row"><span>Emergency contact</span><span>{viewing.families.emergency_contact_name || '—'} {viewing.families.emergency_contact_relationship && `(${viewing.families.emergency_contact_relationship})`}</span></div>
+                  <div className="vp-row"><span>Emergency phone</span><span>{viewing.families.emergency_contact_phone || '—'}</span></div>
+                </>
+              ) : <p style={{ color: 'var(--ink-soft)', fontSize: 14 }}>No family linked.</p>}
+
+              <p className="vp-section">Medical / Allergies (staff only)</p>
+              <p style={{ fontSize: 14 }}>{viewing.medical_notes || '—'}</p>
+
+              <p className="vp-section">Notes</p>
+              <p style={{ fontSize: 14 }}>{viewing.notes || '—'}</p>
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setViewing(null)}>Close</button>
+              <button className="btn" onClick={() => { setViewing(null); setEdit(viewing) }}>Edit this student</button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )
@@ -678,10 +738,23 @@ function Registrations({ onProcessed }) {
     const [firstName, ...rest] = (r.parent_name || '').trim().split(' ')
     const { data: fam } = await supabase.from('families').insert({
       parent_first_name: firstName || r.parent_name, parent_last_name: rest.join(' ') || '', email: r.email, phone: r.phone,
+      secondary_parent_name: r.secondary_parent_name || null,
+      secondary_parent_email: r.secondary_parent_email || null,
+      secondary_parent_phone: r.secondary_parent_phone || null,
+      emergency_contact_name: r.emergency_contact_name || null,
+      emergency_contact_relationship: r.emergency_contact_relationship || null,
+      emergency_contact_phone: r.emergency_contact_phone || null,
+      notes: r.wants_donation ? 'Registration donation intent noted at signup.' : null,
     }).select().single()
     const [sFirst, ...sRest] = (r.student_name || '').trim().split(' ')
+    const meetingNote = [
+      r.meeting_aug28 ? 'Aug 28 meeting' : null,
+      r.meeting_sep3 ? 'Sep 3 meeting' : null,
+    ].filter(Boolean).join(' + ')
     const { data: stu } = await supabase.from('students').insert({
-      first_name: sFirst || r.student_name, last_name: sRest.join(' ') || '', grade: r.student_grade, family_id: fam?.id || null,
+      first_name: sFirst || r.student_name, last_name: sRest.join(' ') || '', grade: r.student_grade,
+      birthday: r.student_birthday || null, family_id: fam?.id || null,
+      notes: meetingNote ? `Parent meeting selected at registration: ${meetingNote}.` : null,
     }).select().single()
     if (r.interested_class && stu) {
       const { data: cls } = await supabase.from('classes').select('id, name, capacity').eq('active', true)
@@ -707,13 +780,19 @@ function Registrations({ onProcessed }) {
         <div className="card"><div className="empty"><h3>You're all caught up</h3><p>New registrations from the public site will show up here.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Parent</th><th>Student</th><th>Interest</th><th>Submitted</th><th></th></tr></thead>
+          <thead><tr><th>Parent</th><th>Student</th><th>Interest</th><th>Meeting</th><th>Submitted</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
                 <td data-label="Parent"><strong>{r.parent_name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.email} {r.phone}</span></td>
                 <td data-label="Student">{r.student_name}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.student_grade}</span></td>
                 <td data-label="Interest">{r.interested_class || '—'}</td>
+                <td data-label="Meeting">
+                  {r.meeting_aug28 && <span className="pill enrolled" style={{ marginRight: 4 }}>Aug 28</span>}
+                  {r.meeting_sep3 && <span className="pill enrolled">Sep 3</span>}
+                  {!r.meeting_aug28 && !r.meeting_sep3 && '—'}
+                  {r.wants_donation && <><br /><span className="pill waitlist" style={{ marginTop: 4, display: 'inline-block' }}>$100 donation</span></>}
+                </td>
                 <td data-label="Submitted">{new Date(r.submitted_date).toLocaleDateString()}</td>
                 <td><div className="row-actions">
                   <button className="btn small" onClick={() => setProcessing(r)}>Add to roster</button>
@@ -731,6 +810,13 @@ function Registrations({ onProcessed }) {
             {processing.interested_class ? <> and tries to enroll them in a class matching "<strong>{processing.interested_class}</strong>."</> : '.'}
             {' '}You can fine-tune the details afterward on the Families and Students screens.
           </p>
+          <div style={{ background: 'var(--cream)', borderRadius: 8, padding: 12, fontSize: 13.5, marginTop: 4 }}>
+            <div><strong>Dancer:</strong> {processing.student_name} {processing.student_birthday && `· born ${processing.student_birthday}`}</div>
+            {processing.secondary_parent_name && <div><strong>2nd parent:</strong> {processing.secondary_parent_name} {processing.secondary_parent_phone}</div>}
+            {processing.emergency_contact_name && <div><strong>Emergency contact:</strong> {processing.emergency_contact_name} ({processing.emergency_contact_relationship}) {processing.emergency_contact_phone}</div>}
+            <div><strong>Parent meeting:</strong> {[processing.meeting_aug28 && 'Aug 28', processing.meeting_sep3 && 'Sep 3'].filter(Boolean).join(', ') || 'none selected'}</div>
+            {processing.wants_donation && <div><strong>💛 Wants to make the $100 registration donation</strong></div>}
+          </div>
         </Modal>
       )}
     </>
