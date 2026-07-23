@@ -187,3 +187,7 @@ textarea { resize: vertical; min-height: 60px; }
 .view-profile .vp-row span:first-child{color:var(--ink-soft);flex-shrink:0}
 .view-profile .vp-row span:last-child{text-align:right}
 .view-profile .vp-section{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--brass-dark, #a3741f);font-weight:600;margin:16px 0 4px}
+
+/* Link-styled button (class name -> jump to its enrollment roster) */
+.link-like{background:none;border:none;padding:0;font:inherit;color:var(--pine);text-decoration:underline;cursor:pointer;text-align:left;font-weight:600}
+.link-like:hover{color:var(--brass-dark, #a3741f)}
