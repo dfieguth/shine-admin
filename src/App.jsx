@@ -21,6 +21,42 @@ function Modal({ title, onClose, children, onSave, saving, saveLabel = 'Save' })
   )
 }
 
+// Click-to-sort table headers, reused across every list screen. Click once
+// for ascending, click the same column again to flip to descending.
+function useSort(initialKey, initialDir = 'asc') {
+  const [key, setKey] = useState(initialKey)
+  const [dir, setDir] = useState(initialDir)
+  function requestSort(k) {
+    if (k === key) setDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else { setKey(k); setDir('asc') }
+  }
+  return { key, dir, requestSort }
+}
+function SortTh({ label, sortKey, sort }) {
+  const active = sort.key === sortKey
+  return (
+    <th onClick={() => sort.requestSort(sortKey)} style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }} title="Click to sort">
+      {label}<span style={{ color: active ? 'var(--brass)' : 'var(--line)', marginLeft: 4 }}>{active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+    </th>
+  )
+}
+// getters: { columnKey: (row) => sortableValue }. Rows with no getter for
+// the current key pass through unsorted (safe no-op).
+function applySort(rows, sort, getters) {
+  const get = getters[sort.key]
+  if (!get) return rows
+  return [...rows].sort((a, b) => {
+    const av = get(a); const bv = get(b)
+    const an = av === null || av === undefined
+    const bn = bv === null || bv === undefined
+    if (an && bn) return 0
+    if (an) return 1 // blanks sort last regardless of direction
+    if (bn) return -1
+    const cmp = (typeof av === 'number' && typeof bv === 'number') ? av - bv : String(av).localeCompare(String(bv))
+    return sort.dir === 'asc' ? cmp : -cmp
+  })
+}
+
 function Field({ label, ...props }) {
   return (
     <div className="field">
@@ -107,7 +143,7 @@ function Classes({ onOpenRoster }) {
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [seasonFilter, setSeasonFilter] = useState('')
-  const [sortBy, setSortBy] = useState('day')
+  const sort = useSort('day')
   const [clsErr, setClsErr] = useState('')
   const [viewingClass, setViewingClass] = useState(null)
   const [rooms, setRooms] = useState([])
@@ -162,41 +198,36 @@ function Classes({ onOpenRoster }) {
   if (!rows) return <div className="loading">Loading…</div>
   const allSeasons = [...new Set(rows.map((c) => c.season || 'unlabeled'))]
   let visible = seasonFilter ? rows.filter((c) => (c.season || 'unlabeled') === seasonFilter) : rows
-  visible = [...visible].sort((x, y) => {
-    if (x.active !== y.active) return x.active ? -1 : 1 // active classes first, always
-    if (sortBy === 'teacher') return (x.teachers?.name || x.instructor_name || '').localeCompare(y.teachers?.name || y.instructor_name || '')
-    if (sortBy === 'name') return (x.name || '').localeCompare(y.name || '')
-    // default: day of week, chronologically (Mon-Sun), not alphabetically
-    return CLASS_DAY_ORDER.indexOf(x.day_of_week) - CLASS_DAY_ORDER.indexOf(y.day_of_week)
+  visible = applySort(visible, sort, {
+    day: (c) => CLASS_DAY_ORDER.indexOf(c.day_of_week),
+    class: (c) => (c.name || '').toLowerCase(),
+    level: (c) => (c.level || '').toLowerCase(),
+    room: (c) => (c.rooms?.name || '').toLowerCase(),
+    teacher: (c) => (c.teachers?.name || c.instructor_name || '').toLowerCase(),
+    status: (c) => c.active ? 0 : 1,
   })
+  visible = [...visible].sort((x, y) => (x.active === y.active) ? 0 : (x.active ? -1 : 1))
   return (
     <>
       <div className="page-head">
         <div><h1>Classes</h1><p>Add or edit a class. Retire pauses a class (and can be restored); delete removes it permanently, from the Edit screen.</p></div>
         <button className="btn" onClick={() => { setClsErr(''); setEdit({ ...BLANK_CLASS, season: seasonFilter || undefined }) }}>Add class</button>
       </div>
-      <div className="toolbar">
-        <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Sort by:</span>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-          <option value="day">Day of week</option>
-          <option value="teacher">Teacher</option>
-          <option value="name">Class name (A–Z)</option>
-        </select>
-        {allSeasons.length > 1 && (
-          <>
-            <select value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
-              <option value="">All seasons</option>
-              {allSeasons.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>Showing {visible.length} of {rows.length} classes</span>
-          </>
-        )}
-      </div>
+      {allSeasons.length > 1 && (
+        <div className="toolbar">
+          <select value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
+            <option value="">All seasons</option>
+            {allSeasons.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>Showing {visible.length} of {rows.length} classes</span>
+        </div>
+      )}
+      <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginBottom: 8 }}>Click any column heading below to sort by it.</p>
       {visible.length === 0 ? (
         <div className="card"><div className="empty"><h3>No classes yet</h3><p>Add your first class to start building the schedule.</p><button className="btn" onClick={() => setEdit({ ...BLANK_CLASS })}>Add class</button></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Class</th><th>Level</th><th>When</th><th>Room</th><th>Instructor</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><SortTh label="Class" sortKey="class" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><SortTh label="When" sortKey="day" sort={sort} /><SortTh label="Room" sortKey="room" sort={sort} /><SortTh label="Instructor" sortKey="teacher" sort={sort} /><SortTh label="Status" sortKey="status" sort={sort} /><th></th></tr></thead>
           <tbody>
             {visible.map((c) => (
               <tr key={c.id}>
@@ -313,6 +344,7 @@ function Families() {
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [q, setQ] = useState('')
+  const sort = useSort('parent')
   const load = useCallback(async () => {
     const { data } = await supabase.from('families').select('*').order('parent_last_name')
     setRows(data || [])
@@ -325,7 +357,15 @@ function Families() {
     setSaving(false); setEdit(null); load()
   }
   if (!rows) return <div className="loading">Loading…</div>
-  const filtered = rows.filter((f) => `${f.parent_first_name} ${f.parent_last_name} ${f.email}`.toLowerCase().includes(q.toLowerCase()))
+  const filtered = applySort(
+    rows.filter((f) => `${f.parent_first_name} ${f.parent_last_name} ${f.email}`.toLowerCase().includes(q.toLowerCase())),
+    sort,
+    {
+      parent: (f) => `${f.parent_last_name} ${f.parent_first_name}`.toLowerCase(),
+      contact: (f) => (f.email || f.phone || '').toLowerCase(),
+      emergency: (f) => (f.emergency_contact_name || '').toLowerCase(),
+    }
+  )
   return (
     <>
       <div className="page-head">
@@ -337,7 +377,7 @@ function Families() {
         <div className="card"><div className="empty"><h3>No families found</h3><p>Add a family, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Parent</th><th>Contact</th><th>Emergency</th><th></th></tr></thead>
+          <thead><tr><SortTh label="Parent" sortKey="parent" sort={sort} /><SortTh label="Contact" sortKey="contact" sort={sort} /><SortTh label="Emergency" sortKey="emergency" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((f) => (
               <tr key={f.id}>
@@ -379,6 +419,7 @@ function Students() {
   const [saving, setSaving] = useState(false)
   const [q, setQ] = useState('')
   const [statusFilter, setStatusFilter] = useState('active')
+  const sort = useSort('name')
   const [photoUrls, setPhotoUrls] = useState({})
   const [busyPhoto, setBusyPhoto] = useState('')
   const [viewing, setViewing] = useState(null)
@@ -429,9 +470,18 @@ function Students() {
   }
   if (!rows) return <div className="loading">Loading…</div>
   const famOptions = [{ value: '', label: '— none —' }, ...families.map((f) => ({ value: f.id, label: `${f.parent_first_name} ${f.parent_last_name}` }))]
-  const filtered = rows
-    .filter((s) => `${s.first_name} ${s.last_name}`.toLowerCase().includes(q.toLowerCase()))
-    .filter((s) => statusFilter === 'all' ? true : (s.season_status || 'active') === statusFilter)
+  const filtered = applySort(
+    rows
+      .filter((s) => `${s.first_name} ${s.last_name}`.toLowerCase().includes(q.toLowerCase()))
+      .filter((s) => statusFilter === 'all' ? true : (s.season_status || 'active') === statusFilter),
+    sort,
+    {
+      name: (s) => `${s.last_name} ${s.first_name}`.toLowerCase(),
+      grade: (s) => s.grade || '',
+      level: (s) => s.level || '',
+      family: (s) => s.families ? `${s.families.parent_last_name} ${s.families.parent_first_name}`.toLowerCase() : '',
+    }
+  )
   return (
     <>
       <div className="page-head">
@@ -450,7 +500,7 @@ function Students() {
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Student</th><th>Grade</th><th>Level</th><th>Classes</th><th>Family</th><th></th></tr></thead>
+          <thead><tr><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
@@ -1129,6 +1179,7 @@ function Teachers() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const sort = useSort('name')
   const load = useCallback(async () => {
     const { data } = await supabase.from('teachers').select('*').order('name')
     setRows(data || [])
@@ -1141,6 +1192,11 @@ function Teachers() {
     setSaving(false); setEdit(null); load()
   }
   if (!rows) return <div className="loading">Loading…</div>
+  const sortedRows = applySort(rows, sort, {
+    name: (t) => (t.name || '').toLowerCase(),
+    teaches: (t) => (t.specialties || '').toLowerCase(),
+    contact: (t) => (t.email || t.phone || '').toLowerCase(),
+  })
   const teacherEmails = rows.map((t) => t.email).filter(Boolean)
   return (
     <>
@@ -1155,9 +1211,9 @@ function Teachers() {
         <div className="card"><div className="empty"><h3>No teachers yet</h3><p>Add your teaching team to keep their contact info in one place.</p><button className="btn" onClick={() => setEdit({ ...BLANK_TEACHER })}>Add teacher</button></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Teaches</th><th>Contact</th><th></th></tr></thead>
+          <thead><tr><SortTh label="Name" sortKey="name" sort={sort} /><SortTh label="Teaches" sortKey="teaches" sort={sort} /><SortTh label="Contact" sortKey="contact" sort={sort} /><th></th></tr></thead>
           <tbody>
-            {rows.map((t) => (
+            {sortedRows.map((t) => (
               <tr key={t.id}>
                 <td data-label="Name"><strong>{t.name}</strong></td>
                 <td data-label="Teaches">{t.specialties || '—'}</td>
@@ -1905,6 +1961,7 @@ function Volunteers() {
   const [roster, setRoster] = useState(null)
   const [statusFilter, setStatusFilter] = useState('active')
   const [roleFilter, setRoleFilter] = useState('')
+  const rosterSort = useSort('name')
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [assigning, setAssigning] = useState(null) // an inquiry being turned into a roster entry
@@ -1951,9 +2008,18 @@ function Volunteers() {
 
   if (inquiries === null || roster === null) return <div className="loading">Loading…</div>
 
-  const filteredRoster = roster
-    .filter((v) => statusFilter === 'all' ? true : v.active === (statusFilter === 'active'))
-    .filter((v) => roleFilter ? (v.roles || []).includes(roleFilter) : true)
+  const filteredRoster = applySort(
+    roster
+      .filter((v) => statusFilter === 'all' ? true : v.active === (statusFilter === 'active'))
+      .filter((v) => roleFilter ? (v.roles || []).includes(roleFilter) : true),
+    rosterSort,
+    {
+      name: (v) => (v.name || '').toLowerCase(),
+      roles: (v) => (v.roles || []).join(', ').toLowerCase(),
+      contact: (v) => (v.email || v.phone || '').toLowerCase(),
+      status: (v) => v.active ? 0 : 1,
+    }
+  )
   const rosterEmails = filteredRoster.map((v) => v.email).filter(Boolean)
 
   return (
@@ -2009,7 +2075,7 @@ function Volunteers() {
             <div className="card"><div className="empty"><h3>No volunteers here yet</h3><p>Add one manually, or move an inquiry over from the Inquiries tab.</p></div></div>
           ) : (
             <div className="table-wrap"><table>
-              <thead><tr><th>Name</th><th>Roles</th><th>Contact</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><SortTh label="Name" sortKey="name" sort={rosterSort} /><SortTh label="Roles" sortKey="roles" sort={rosterSort} /><SortTh label="Contact" sortKey="contact" sort={rosterSort} /><SortTh label="Status" sortKey="status" sort={rosterSort} /><th></th></tr></thead>
               <tbody>{filteredRoster.map((v) => (
                 <tr key={v.id}>
                   <td data-label="Name"><strong>{v.name}</strong></td>
