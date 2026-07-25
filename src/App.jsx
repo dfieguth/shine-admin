@@ -424,6 +424,11 @@ function Students() {
   const [busyPhoto, setBusyPhoto] = useState('')
   const [viewing, setViewing] = useState(null)
   const [enrollMap, setEnrollMap] = useState({})
+  const [enrolling, setEnrolling] = useState(null) // student being enrolled
+  const [availableClasses, setAvailableClasses] = useState([])
+  const [pickedClassIds, setPickedClassIds] = useState([])
+  const [enrollBusy, setEnrollBusy] = useState(false)
+  const [enrollNote, setEnrollNote] = useState('')
   const load = useCallback(async () => {
     const [s, f, enr] = await Promise.all([
       supabase.from('students').select('*, families(*)').order('last_name'),
@@ -455,6 +460,33 @@ function Students() {
     await supabase.storage.from('student-photos').upload(path, file, { upsert: true, contentType: file.type })
     await supabase.from('students').update({ photo_path: path }).eq('id', s.id)
     setBusyPhoto(''); load()
+  }
+  // Pulls the SAME active classes shown on the Classes page — nothing
+  // separate to keep in sync.
+  async function openEnroll(s) {
+    setEnrolling(s); setPickedClassIds([]); setEnrollNote('')
+    const [{ data: cls }, { data: existing }] = await Promise.all([
+      supabase.from('classes').select('id, name, day_of_week, start_time, capacity').eq('active', true).order('name'),
+      supabase.from('enrollments').select('class_id, status').eq('student_id', s.id).eq('status', 'enrolled'),
+    ])
+    const already = new Set((existing || []).map((e) => e.class_id))
+    setAvailableClasses((cls || []).map((c) => ({ ...c, alreadyEnrolled: already.has(c.id) })))
+  }
+  function togglePickClass(id) {
+    setPickedClassIds((ids) => ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id])
+  }
+  async function confirmEnroll() {
+    if (!pickedClassIds.length) { setEnrollNote('Pick at least one class.'); return }
+    setEnrollBusy(true)
+    let waitlistedCount = 0
+    for (const classId of pickedClassIds) {
+      const cls = availableClasses.find((c) => c.id === classId)
+      const status = await enrollStudentInClass(enrolling.id, classId, cls?.capacity)
+      if (status === 'waitlist') waitlistedCount++
+    }
+    setEnrollBusy(false)
+    setEnrollNote(waitlistedCount ? `Enrolled — ${waitlistedCount} class${waitlistedCount > 1 ? 'es' : ''} full, added to waitlist instead.` : 'Enrolled ✓')
+    setTimeout(() => { setEnrolling(null); load() }, waitlistedCount ? 2200 : 900)
   }
   const [saveErr, setSaveErr] = useState('')
   async function save() {
@@ -521,6 +553,7 @@ function Students() {
                     {busyPhoto === s.id ? 'Uploading…' : 'Photo'}
                     <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => uploadPhoto(s, e)} />
                   </label>
+                  <button className="btn ghost small" onClick={() => openEnroll(s)}>Enroll</button>
                   <button className="btn ghost small" onClick={() => setViewing(s)}>View</button>
                   <button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button>
                 </div></td>
@@ -629,6 +662,27 @@ function Students() {
             </div>
           </div>
         </div>
+      )}
+      {enrolling && (
+        <Modal title={`Enroll ${enrolling.first_name} in a class`} onClose={() => setEnrolling(null)} onSave={confirmEnroll} saving={enrollBusy} saveLabel="Enroll">
+          <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', marginBottom: 10 }}>Pick one or more classes — these are the same active classes shown on the Classes page.</p>
+          {availableClasses.length === 0 ? (
+            <p style={{ fontSize: 14 }}>No active classes yet — add one on the Classes screen first.</p>
+          ) : (
+            <div className="class-check-list" style={{ maxHeight: 280, overflowY: 'auto' }}>
+              {availableClasses.map((c) => (
+                <label key={c.id} className="class-check-row" style={{ opacity: c.alreadyEnrolled ? 0.5 : 1 }}>
+                  <input type="checkbox" disabled={c.alreadyEnrolled} checked={pickedClassIds.includes(c.id)} onChange={() => togglePickClass(c.id)} />
+                  <span>
+                    <strong>{c.name}</strong>{c.alreadyEnrolled && <span style={{ marginLeft: 6, fontSize: 12, color: 'var(--ink-soft)' }}>(already enrolled)</span>}
+                    <br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>{c.day_of_week} {c.start_time}{c.capacity ? ` · capacity ${c.capacity}` : ''}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+          {enrollNote && <p style={{ fontSize: 13.5, marginTop: 10, color: enrollNote.startsWith('Enrolled') ? 'var(--ok)' : 'var(--danger)' }}>{enrollNote}</p>}
+        </Modal>
       )}
     </>
   )
@@ -925,6 +979,20 @@ async function enrollInAllMatchedClasses(studentId, interestedClassText) {
     }
     await supabase.from('enrollments').insert({ student_id: studentId, class_id: match.id, status })
   }
+}
+
+// Same capacity-aware enrolling, but by real class ID rather than fuzzy
+// text matching — used when the class is picked directly from a list
+// (e.g. the Students screen's "Enroll in class" button), not typed at
+// registration.
+async function enrollStudentInClass(studentId, classId, capacity) {
+  let status = 'enrolled'
+  if (capacity) {
+    const { count } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', classId).eq('status', 'enrolled')
+    if ((count ?? 0) >= capacity) status = 'waitlist'
+  }
+  await supabase.from('enrollments').insert({ student_id: studentId, class_id: classId, status })
+  return status
 }
 
 function normPhone(p) { return (p || '').replace(/\D/g, '') }
