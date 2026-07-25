@@ -147,13 +147,18 @@ function Classes({ onOpenRoster }) {
   const [clsErr, setClsErr] = useState('')
   const [viewingClass, setViewingClass] = useState(null)
   const [rooms, setRooms] = useState([])
+  const [enrollCounts, setEnrollCounts] = useState({})
   const load = useCallback(async () => {
-    const [c, t, rm] = await Promise.all([
+    const [c, t, rm, counts] = await Promise.all([
       supabase.from('classes').select('*, rooms(name), teachers(name)').order('season', { ascending: false }).order('active', { ascending: false }).order('day_of_week'),
       supabase.from('teachers').select('id, name').order('name'),
       supabase.from('rooms').select('id, name').order('name'),
+      supabase.rpc('class_enrollment_counts'),
     ])
     setRows(c.data || []); setTeachers(t.data || []); setRooms(rm.data || [])
+    const cm = {}
+    for (const r of counts.data || []) cm[r.class_id] = Number(r.enrolled)
+    setEnrollCounts(cm)
     if (!seasonFilter && c.data?.length) setSeasonFilter(c.data[0].season || '')
   }, [seasonFilter])
   useEffect(() => { load() }, [load])
@@ -231,7 +236,13 @@ function Classes({ onOpenRoster }) {
           <tbody>
             {visible.map((c) => (
               <tr key={c.id}>
-                <td data-label="Class"><button className="link-like" onClick={() => onOpenRoster && onOpenRoster(c.id)}>{c.name}</button></td>
+                <td data-label="Class">
+                  <button className="link-like" onClick={() => onOpenRoster && onOpenRoster(c.id)}>{c.name}</button>
+                  <br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>
+                    {enrollCounts[c.id] || 0}{c.capacity ? `/${c.capacity}` : ''} enrolled
+                    {c.capacity && (enrollCounts[c.id] || 0) >= c.capacity && <span className="pill waitlist" style={{ marginLeft: 6 }}>FULL</span>}
+                  </span>
+                </td>
                 <td data-label="Level">{c.level}{(c.min_age || c.max_age) && <><br /><span style={{ color: 'var(--ink-soft)', fontSize: 12.5 }}>Ages {c.min_age || '0'}{c.max_age ? `–${c.max_age}` : '+'}</span></>}</td>
                 <td data-label="When">{c.day_of_week}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{c.start_time}{c.end_time ? `–${c.end_time}` : ''}</span></td>
                 <td data-label="Room">{c.rooms?.name || '—'}</td>
