@@ -148,17 +148,23 @@ function Classes({ onOpenRoster }) {
   const [viewingClass, setViewingClass] = useState(null)
   const [rooms, setRooms] = useState([])
   const [enrollCounts, setEnrollCounts] = useState({})
+  const [waitlistCounts, setWaitlistCounts] = useState({})
   const load = useCallback(async () => {
-    const [c, t, rm, counts] = await Promise.all([
+    const [c, t, rm, enr] = await Promise.all([
       supabase.from('classes').select('*, rooms(name), teachers(name)').order('season', { ascending: false }).order('active', { ascending: false }).order('day_of_week'),
       supabase.from('teachers').select('id, name').order('name'),
       supabase.from('rooms').select('id, name').order('name'),
-      supabase.rpc('class_enrollment_counts'),
+      // Admin can read enrollments directly, so counting both enrolled AND
+      // waitlisted per class in one pass, no separate DB function needed.
+      supabase.from('enrollments').select('class_id, status').in('status', ['enrolled', 'waitlist']),
     ])
     setRows(c.data || []); setTeachers(t.data || []); setRooms(rm.data || [])
-    const cm = {}
-    for (const r of counts.data || []) cm[r.class_id] = Number(r.enrolled)
-    setEnrollCounts(cm)
+    const em = {}, wm = {}
+    for (const e of enr.data || []) {
+      if (e.status === 'enrolled') em[e.class_id] = (em[e.class_id] || 0) + 1
+      else if (e.status === 'waitlist') wm[e.class_id] = (wm[e.class_id] || 0) + 1
+    }
+    setEnrollCounts(em); setWaitlistCounts(wm)
     if (!seasonFilter && c.data?.length) setSeasonFilter(c.data[0].season || '')
   }, [seasonFilter])
   useEffect(() => { load() }, [load])
@@ -241,6 +247,7 @@ function Classes({ onOpenRoster }) {
                   <br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>
                     {enrollCounts[c.id] || 0}{c.capacity ? `/${c.capacity}` : ''} enrolled
                     {c.capacity && (enrollCounts[c.id] || 0) >= c.capacity && <span className="pill waitlist" style={{ marginLeft: 6 }}>FULL</span>}
+                    {(waitlistCounts[c.id] || 0) > 0 && <span style={{ marginLeft: 6, color: 'var(--brass-dark, #a3741f)', fontWeight: 500 }}>· {waitlistCounts[c.id]} waitlisted</span>}
                   </span>
                 </td>
                 <td data-label="Level">{c.level}{(c.min_age || c.max_age) && <><br /><span style={{ color: 'var(--ink-soft)', fontSize: 12.5 }}>Ages {c.min_age || '0'}{c.max_age ? `–${c.max_age}` : '+'}</span></>}</td>
@@ -957,6 +964,11 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
           <thead><tr><th>Student</th><th>Class</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {[...filtered].sort((x, y) => {
+              // Enrolled first, then waitlisted, then dropped — within each
+              // group, alphabetical by student name.
+              const statusOrder = { enrolled: 0, waitlist: 1, dropped: 2 }
+              const so = (statusOrder[x.status] ?? 3) - (statusOrder[y.status] ?? 3)
+              if (so !== 0) return so
               const nx = x.students ? `${x.students.last_name} ${x.students.first_name}` : ''
               const ny = y.students ? `${y.students.last_name} ${y.students.first_name}` : ''
               return nx.localeCompare(ny)
