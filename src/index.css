@@ -191,3 +191,11 @@ textarea { resize: vertical; min-height: 60px; }
 /* Link-styled button (class name -> jump to its enrollment roster) */
 .link-like{background:none;border:none;padding:0;font:inherit;color:var(--pine);text-decoration:underline;cursor:pointer;text-align:left;font-weight:600}
 .link-like:hover{color:var(--brass-dark, #a3741f)}
+
+/* Class checklist rows (Students -> Classes modal): checkbox beside the
+   label, not stacked above it. Mirrors the same pattern used on the
+   public registration form. */
+.class-check-list{max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:9px;padding:6px 4px;background:#fff}
+.class-check-row{display:flex;gap:10px;align-items:flex-start;padding:9px;font-size:14px;cursor:pointer;border-radius:6px}
+.class-check-row:hover{background:var(--cream)}
+.class-check-row input{width:auto;flex-shrink:0;margin-top:3px}
