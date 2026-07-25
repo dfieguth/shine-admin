@@ -99,12 +99,15 @@ const BLANK_CLASS = { name: '', level: 'Beginner', day_of_week: 'Monday', start_
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 const LEVELS = ['Beginner', 'Intermediate', 'Advanced', 'All levels']
 
+const CLASS_DAY_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
 function Classes({ onOpenRoster }) {
   const [rows, setRows] = useState(null)
   const [teachers, setTeachers] = useState([])
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [seasonFilter, setSeasonFilter] = useState('')
+  const [sortBy, setSortBy] = useState('day')
   const [clsErr, setClsErr] = useState('')
   const [viewingClass, setViewingClass] = useState(null)
   const [rooms, setRooms] = useState([])
@@ -158,21 +161,37 @@ function Classes({ onOpenRoster }) {
   }
   if (!rows) return <div className="loading">Loading…</div>
   const allSeasons = [...new Set(rows.map((c) => c.season || 'unlabeled'))]
-  const visible = seasonFilter ? rows.filter((c) => (c.season || 'unlabeled') === seasonFilter) : rows
+  let visible = seasonFilter ? rows.filter((c) => (c.season || 'unlabeled') === seasonFilter) : rows
+  visible = [...visible].sort((x, y) => {
+    if (x.active !== y.active) return x.active ? -1 : 1 // active classes first, always
+    if (sortBy === 'teacher') return (x.teachers?.name || x.instructor_name || '').localeCompare(y.teachers?.name || y.instructor_name || '')
+    if (sortBy === 'name') return (x.name || '').localeCompare(y.name || '')
+    // default: day of week, chronologically (Mon-Sun), not alphabetically
+    return CLASS_DAY_ORDER.indexOf(x.day_of_week) - CLASS_DAY_ORDER.indexOf(y.day_of_week)
+  })
   return (
     <>
       <div className="page-head">
         <div><h1>Classes</h1><p>Add or edit a class. Retire pauses a class (and can be restored); delete removes it permanently, from the Edit screen.</p></div>
         <button className="btn" onClick={() => { setClsErr(''); setEdit({ ...BLANK_CLASS, season: seasonFilter || undefined }) }}>Add class</button>
       </div>
-      {allSeasons.length > 1 && (
-        <div className="toolbar">
-          <select value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
-            {allSeasons.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-          <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>Showing {visible.length} of {rows.length} classes across all seasons</span>
-        </div>
-      )}
+      <div className="toolbar">
+        <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Sort by:</span>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+          <option value="day">Day of week</option>
+          <option value="teacher">Teacher</option>
+          <option value="name">Class name (A–Z)</option>
+        </select>
+        {allSeasons.length > 1 && (
+          <>
+            <select value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
+              <option value="">All seasons</option>
+              {allSeasons.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>Showing {visible.length} of {rows.length} classes</span>
+          </>
+        )}
+      </div>
       {visible.length === 0 ? (
         <div className="card"><div className="empty"><h3>No classes yet</h3><p>Add your first class to start building the schedule.</p><button className="btn" onClick={() => setEdit({ ...BLANK_CLASS })}>Add class</button></div></div>
       ) : (
@@ -567,6 +586,7 @@ function Students() {
 
 function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   const [rows, setRows] = useState(null)
+  const [statusFilter, setStatusFilter] = useState('')
   const [students, setStudents] = useState([])
   const [classes, setClasses] = useState([])
   const [adding, setAdding] = useState(null)
@@ -728,7 +748,9 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
     w.document.close(); w.focus(); w.print()
   }
   if (!rows) return <div className="loading">Loading…</div>
-  const filtered = filterClass ? rows.filter((r) => r.class_id === filterClass) : rows
+  const filtered = rows
+    .filter((r) => filterClass ? r.class_id === filterClass : true)
+    .filter((r) => statusFilter ? r.status === statusFilter : true)
   return (
     <>
       <div className="page-head">
@@ -744,11 +766,17 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
             return <option key={c.id} value={c.id}>{c.name}{cap}</option>
           })}
         </select>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="">All statuses</option>
+          <option value="enrolled">Enrolled only</option>
+          <option value="waitlist">Waitlist only</option>
+          <option value="dropped">Dropped only</option>
+        </select>
         {filterClass && <button className="btn ghost small" onClick={copyEmails}>{copied || 'Copy parent emails'}</button>}
         {filterClass && <button className="btn ghost small" onClick={printRoster}>Print roster</button>}
         {filterClass && <button className="btn ghost small" onClick={openBroadcast}>Email class</button>}
         <div className="spacer" />
-        <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{filtered.length} enrollment{filtered.length !== 1 ? 's' : ''}</span>
+        <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{filtered.length} {statusFilter || 'total'}{statusFilter ? '' : ' enrollment'}{filtered.length !== 1 && !statusFilter ? 's' : ''}</span>
       </div>
       <div className="toolbar">
         <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Email a whole group — pick by:</span>
@@ -2037,6 +2065,42 @@ function Volunteers() {
   )
 }
 
+function InterestList() {
+  const [rows, setRows] = useState(null)
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('contact_interest').select('*').order('created_at', { ascending: false })
+    setRows(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function remove(id) { await supabase.from('contact_interest').delete().eq('id', id); load() }
+  if (!rows) return <div className="loading">Loading…</div>
+  const emails = rows.map((r) => r.email).filter(Boolean)
+  return (
+    <>
+      <div className="page-head"><div><h1>Interest List</h1><p>People who aren't enrolling right now but want to hear when new classes open up — from the "Just have questions?" link on the website.</p></div></div>
+      <div className="toolbar">
+        <EmailGroupButton emails={emails} label="the interest list" />
+      </div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No one on the list yet</h3><p>Signups from the website's "Just have questions?" link show up here.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Contact</th><th>Message</th><th>When</th><th></th></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.id}>
+              <td data-label="Name"><strong>{r.name}</strong></td>
+              <td data-label="Contact">{r.email || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.phone}</span></td>
+              <td data-label="Message">{r.message || '—'}</td>
+              <td data-label="When">{new Date(r.created_at).toLocaleDateString()}</td>
+              <td><div className="row-actions"><button className="btn danger small" onClick={() => remove(r.id)}>Remove</button></div></td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </>
+  )
+}
+
 const NAV = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'enrollments', label: 'Enrollments' },
@@ -2056,6 +2120,7 @@ const NAV = [
   { key: 'season', label: 'New Season' },
   { key: 'registrations', label: 'Registrations' },
   { key: 'volunteers', label: 'Volunteers' },
+  { key: 'interest', label: 'Interest List' },
 ]
 
 // Hard safelist: no matter what Corrie checks in Teacher Access, a teacher
@@ -2132,6 +2197,7 @@ export default function App() {
         {safePage === 'rooms' && <Rooms />}
         {safePage === 'registrations' && !isTeacher && <Registrations onProcessed={refreshRegCount} />}
         {safePage === 'volunteers' && !isTeacher && <Volunteers />}
+        {safePage === 'interest' && !isTeacher && <InterestList />}
         {safePage === 'teacher-access' && !isTeacher && <TeacherAccess />}
       </main>
     </div>
