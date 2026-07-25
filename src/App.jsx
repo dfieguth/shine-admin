@@ -425,6 +425,7 @@ function Students() {
   const [viewing, setViewing] = useState(null)
   const [enrollMap, setEnrollMap] = useState({})
   const [enrolling, setEnrolling] = useState(null) // student being enrolled
+  const [currentEnrollments, setCurrentEnrollments] = useState([])
   const [availableClasses, setAvailableClasses] = useState([])
   const [pickedClassIds, setPickedClassIds] = useState([])
   const [enrollBusy, setEnrollBusy] = useState(false)
@@ -462,13 +463,19 @@ function Students() {
     setBusyPhoto(''); load()
   }
   // Pulls the SAME active classes shown on the Classes page — nothing
-  // separate to keep in sync.
+  // separate to keep in sync. Also loads this student's CURRENT
+  // enrollments (any non-dropped status) so they can be dropped/removed
+  // right here, not just added to.
   async function openEnroll(s) {
     setEnrolling(s); setPickedClassIds([]); setEnrollNote('')
+    await refreshEnrollModal(s)
+  }
+  async function refreshEnrollModal(s) {
     const [{ data: cls }, { data: existing }] = await Promise.all([
       supabase.from('classes').select('id, name, day_of_week, start_time, capacity').eq('active', true).order('name'),
-      supabase.from('enrollments').select('class_id, status').eq('student_id', s.id).eq('status', 'enrolled'),
+      supabase.from('enrollments').select('id, class_id, status, classes(name, day_of_week, start_time)').eq('student_id', s.id).neq('status', 'dropped'),
     ])
+    setCurrentEnrollments(existing || [])
     const already = new Set((existing || []).map((e) => e.class_id))
     setAvailableClasses((cls || []).map((c) => ({ ...c, alreadyEnrolled: already.has(c.id) })))
   }
@@ -484,9 +491,22 @@ function Students() {
       const status = await enrollStudentInClass(enrolling.id, classId, cls?.capacity)
       if (status === 'waitlist') waitlistedCount++
     }
-    setEnrollBusy(false)
+    setEnrollBusy(false); setPickedClassIds([])
     setEnrollNote(waitlistedCount ? `Enrolled — ${waitlistedCount} class${waitlistedCount > 1 ? 'es' : ''} full, added to waitlist instead.` : 'Enrolled ✓')
-    setTimeout(() => { setEnrolling(null); load() }, waitlistedCount ? 2200 : 900)
+    await refreshEnrollModal(enrolling)
+    setTimeout(() => setEnrollNote(''), 2500)
+    load()
+  }
+  // Drop = keep the history (attendance stays attached), just marks them
+  // no longer active in that class. Remove = permanently delete the
+  // enrollment row. Same distinction the Enrollments screen already uses.
+  async function unenrollDrop(enr) {
+    await supabase.from('enrollments').update({ status: 'dropped' }).eq('id', enr.id)
+    await refreshEnrollModal(enrolling); load()
+  }
+  async function unenrollRemove(enr) {
+    await supabase.from('enrollments').delete().eq('id', enr.id)
+    await refreshEnrollModal(enrolling); load()
   }
   const [saveErr, setSaveErr] = useState('')
   async function save() {
@@ -553,7 +573,7 @@ function Students() {
                     {busyPhoto === s.id ? 'Uploading…' : 'Photo'}
                     <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => uploadPhoto(s, e)} />
                   </label>
-                  <button className="btn ghost small" onClick={() => openEnroll(s)}>Enroll</button>
+                  <button className="btn ghost small" onClick={() => openEnroll(s)}>Classes</button>
                   <button className="btn ghost small" onClick={() => setViewing(s)}>View</button>
                   <button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button>
                 </div></td>
@@ -664,17 +684,35 @@ function Students() {
         </div>
       )}
       {enrolling && (
-        <Modal title={`Enroll ${enrolling.first_name} in a class`} onClose={() => setEnrolling(null)} onSave={confirmEnroll} saving={enrollBusy} saveLabel="Enroll">
-          <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', marginBottom: 10 }}>Pick one or more classes — these are the same active classes shown on the Classes page.</p>
+        <Modal title={`${enrolling.first_name}'s classes`} onClose={() => setEnrolling(null)} onSave={confirmEnroll} saving={enrollBusy} saveLabel="Enroll in checked classes">
+          {currentEnrollments.length > 0 && (
+            <div style={{ marginBottom: 18 }}>
+              <p style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Currently in:</p>
+              {currentEnrollments.map((e) => (
+                <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 12px', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 6 }}>
+                  <span style={{ fontSize: 14 }}>
+                    <strong>{e.classes?.name || '—'}</strong> <span className={`pill ${e.status}`} style={{ marginLeft: 6 }}>{e.status}</span>
+                    <br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>{e.classes?.day_of_week} {e.classes?.start_time}</span>
+                  </span>
+                  <div className="row-actions">
+                    <button className="btn ghost small" onClick={() => unenrollDrop(e)}>Drop</button>
+                    <button className="btn danger small" onClick={() => unenrollRemove(e)}>Remove</button>
+                  </div>
+                </div>
+              ))}
+              <p style={{ fontSize: 12, color: 'var(--ink-soft)', marginTop: 4 }}>Drop keeps their history (e.g. past attendance) but marks them no longer active. Remove deletes the enrollment entirely.</p>
+            </div>
+          )}
+          <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', marginBottom: 10 }}>Add to another class — these are the same active classes shown on the Classes page.</p>
           {availableClasses.length === 0 ? (
             <p style={{ fontSize: 14 }}>No active classes yet — add one on the Classes screen first.</p>
           ) : (
-            <div className="class-check-list" style={{ maxHeight: 280, overflowY: 'auto' }}>
+            <div className="class-check-list" style={{ maxHeight: 220, overflowY: 'auto' }}>
               {availableClasses.map((c) => (
                 <label key={c.id} className="class-check-row" style={{ opacity: c.alreadyEnrolled ? 0.5 : 1 }}>
                   <input type="checkbox" disabled={c.alreadyEnrolled} checked={pickedClassIds.includes(c.id)} onChange={() => togglePickClass(c.id)} />
                   <span>
-                    <strong>{c.name}</strong>{c.alreadyEnrolled && <span style={{ marginLeft: 6, fontSize: 12, color: 'var(--ink-soft)' }}>(already enrolled)</span>}
+                    <strong>{c.name}</strong>{c.alreadyEnrolled && <span style={{ marginLeft: 6, fontSize: 12, color: 'var(--ink-soft)' }}>(already in this class)</span>}
                     <br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>{c.day_of_week} {c.start_time}{c.capacity ? ` · capacity ${c.capacity}` : ''}</span>
                   </span>
                 </label>
@@ -859,7 +897,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
     <>
       <div className="page-head">
         <div><h1>Enrollments</h1><p>Who is in which class. Add, move, or drop in one click.</p></div>
-        <button className="btn" onClick={() => setAdding({ student_id: '', class_id: '' })}>Enroll a student</button>
+        <button className="btn" onClick={() => setAdding({ student_id: '', class_id: filterClass || '' })}>Enroll a student</button>
       </div>
       <div className="toolbar">
         <select value={filterClass} onChange={(e) => setFilterClass(e.target.value)}>
