@@ -440,6 +440,8 @@ function Students() {
   const [saving, setSaving] = useState(false)
   const [q, setQ] = useState('')
   const [statusFilter, setStatusFilter] = useState('active')
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
   const sort = useSort('name')
   const [photoUrls, setPhotoUrls] = useState({})
   const [busyPhoto, setBusyPhoto] = useState('')
@@ -493,6 +495,30 @@ function Students() {
     setDeleting(true)
     await supabase.from('students').delete().eq('id', confirmDelete.id)
     setDeleting(false); setConfirmDelete(null); setEdit(null); load()
+  }
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+  function toggleSelectAll(visibleIds) {
+    setSelectedIds((prev) => {
+      const allSelected = visibleIds.every((id) => prev.has(id))
+      if (allSelected) {
+        const next = new Set(prev)
+        visibleIds.forEach((id) => next.delete(id))
+        return next
+      }
+      return new Set([...prev, ...visibleIds])
+    })
+  }
+  async function bulkSetStatus(status) {
+    if (!selectedIds.size) return
+    setBulkBusy(true)
+    await supabase.from('students').update({ season_status: status }).in('id', [...selectedIds])
+    setBulkBusy(false); setSelectedIds(new Set()); load()
   }
   async function uploadPhoto(s, e) {
     const file = e.target.files?.[0]; if (!file) return
@@ -587,15 +613,25 @@ function Students() {
           <option value="inactive">Inactive only</option>
           <option value="all">All students</option>
         </select>
+        {selectedIds.size > 0 && (
+          <>
+            <div className="spacer" />
+            <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{selectedIds.size} selected</span>
+            <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('inactive')}>Mark Inactive</button>
+            <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('active')}>Mark Active</button>
+            <button className="btn ghost small" onClick={() => setSelectedIds(new Set())}>Clear</button>
+          </>
+        )}
       </div>
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><th></th></tr></thead>
+          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
+                <td><input type="checkbox" checked={selectedIds.has(s.id)} onChange={() => toggleSelect(s.id)} /></td>
                 <td data-label="Student">
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                     {s.photo_path && photoUrls[s.photo_path]
