@@ -1527,6 +1527,64 @@ function Announcements() {
   )
 }
 
+const BLANK_POLICY = { title: '', body: '', sort_order: 0, active: true }
+function Policies() {
+  const [rows, setRows] = useState(null)
+  const [edit, setEdit] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('policy_sections').select('*').order('sort_order')
+    setRows(data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function save() {
+    setSaving(true)
+    const payload = { ...edit, sort_order: Number(edit.sort_order) || 0 }
+    if (edit.id) await supabase.from('policy_sections').update(payload).eq('id', edit.id)
+    else await supabase.from('policy_sections').insert(payload)
+    setSaving(false); setEdit(null); load()
+  }
+  async function toggleActive(p) { await supabase.from('policy_sections').update({ active: !p.active }).eq('id', p.id); load() }
+  async function remove(id) { await supabase.from('policy_sections').delete().eq('id', id); load() }
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="page-head">
+        <div><h1>Policies &amp; Forms</h1><p>The content on the public site's Policies &amp; Forms page. Order is the small number — lower shows first.</p></div>
+        <button className="btn" onClick={() => setEdit({ ...BLANK_POLICY, sort_order: rows.length })}>Add section</button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No policy sections yet</h3><p>Add one — meeting dates, recital info, attendance expectations, etc.</p><button className="btn" onClick={() => setEdit({ ...BLANK_POLICY })}>Add section</button></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Order</th><th>Section</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.id}>
+                <td data-label="Order">{p.sort_order}</td>
+                <td data-label="Section"><strong>{p.title}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{p.body.slice(0, 80)}{p.body.length > 80 ? '…' : ''}</span></td>
+                <td data-label="Status"><span className={`pill ${p.active ? 'enrolled' : 'inactive'}`}>{p.active ? 'Visible' : 'Hidden'}</span></td>
+                <td><div className="row-actions">
+                  <button className="btn ghost small" onClick={() => setEdit(p)}>Edit</button>
+                  <button className="btn ghost small" onClick={() => toggleActive(p)}>{p.active ? 'Hide' : 'Show'}</button>
+                  <button className="btn danger small" onClick={() => remove(p.id)}>Delete</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+      {edit && (
+        <Modal title={edit.id ? 'Edit section' : 'Add section'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+          <Field label="Section title" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} placeholder="e.g. Mandatory Parent Meetings" />
+          <Field label="Body text" textarea value={edit.body} onChange={(e) => setEdit({ ...edit, body: e.target.value })} style={{ minHeight: 160 }} placeholder="Plain text — blank lines create paragraph breaks, lines starting with • become bullet points." />
+          <Field label="Order (lower shows first)" type="number" value={edit.sort_order} onChange={(e) => setEdit({ ...edit, sort_order: e.target.value })} />
+        </Modal>
+      )}
+    </>
+  )
+}
+
 const BLANK_MEMBER = { name: '', role: '', bio: '', sort_order: 0, active: true }
 function Team() {
   const [rows, setRows] = useState(null)
@@ -1777,6 +1835,7 @@ const TEACHER_GRANTABLE = [
   { key: 'team', label: 'Our Team', note: 'Low risk — manage public bios.' },
   { key: 'testimonials', label: 'Testimonials', note: 'Low risk — manage public quotes.' },
   { key: 'announcements', label: 'Announcements', note: 'Low risk — post public banners.' },
+  { key: 'policies', label: 'Policies & Forms', note: 'Low risk — manage the public policies page content.' },
 ]
 // Families, Registrations, and Volunteer Inquiries are never offered here —
 // they're blocked for teacher logins at the DATABASE level (see migration-9),
@@ -2238,6 +2297,7 @@ const NAV = [
   { key: 'team', label: 'Our Team' },
   { key: 'testimonials', label: 'Testimonials' },
   { key: 'announcements', label: 'Announcements' },
+  { key: 'policies', label: 'Policies & Forms' },
   { key: 'privacy', label: 'Privacy Settings' },
   { key: 'season', label: 'New Season' },
   { key: 'registrations', label: 'Registrations' },
@@ -2249,7 +2309,7 @@ const NAV = [
 // login can NEVER see anything outside this list. This is enforced here in
 // code, not just as a UI suggestion — it's the backstop if a bad value ever
 // ends up in the database.
-const TEACHER_MAX_GRANTABLE = ['attendance', 'my-classes', 'classes', 'enrollments', 'students', 'rooms', 'teachers', 'photos', 'team', 'testimonials', 'announcements']
+const TEACHER_MAX_GRANTABLE = ['attendance', 'my-classes', 'classes', 'enrollments', 'students', 'rooms', 'teachers', 'photos', 'team', 'testimonials', 'announcements', 'policies']
 
 export default function App() {
   const [session, setSession] = useState(undefined)
@@ -2317,6 +2377,7 @@ export default function App() {
         {safePage === 'team' && <Team />}
         {safePage === 'testimonials' && <Testimonials />}
         {safePage === 'announcements' && <Announcements />}
+        {safePage === 'policies' && <Policies />}
         {safePage === 'privacy' && !isTeacher && <PrivacySettings />}
         {safePage === 'season' && !isTeacher && <SeasonRollover />}
         {safePage === 'rooms' && <Rooms />}
