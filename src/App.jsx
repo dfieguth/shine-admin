@@ -228,7 +228,10 @@ function Classes({ onOpenRoster }) {
         <div className="toolbar">
           <select value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
             <option value="">All seasons</option>
-            {allSeasons.map((s) => <option key={s} value={s}>{s}</option>)}
+            {allSeasons
+              .map((s) => ({ label: s, count: rows.filter((c) => (c.season || 'unlabeled') === s).length }))
+              .sort((a, b) => b.label.localeCompare(a.label))
+              .map(({ label, count }) => <option key={label} value={label}>{label} ({count} class{count !== 1 ? 'es' : ''})</option>)}
           </select>
           <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>Showing {visible.length} of {rows.length} classes</span>
         </div>
@@ -429,7 +432,7 @@ function Families() {
   )
 }
 
-const BLANK_STUDENT = { first_name: '', last_name: '', grade: '', level: 'Beginner', family_id: '', season_status: 'active', medical_notes: '', notes: '' }
+const BLANK_STUDENT = { first_name: '', last_name: '', grade: '', level: 'Beginner', family_id: '', season_status: 'inactive', medical_notes: '', notes: '' }
 function Students() {
   const [rows, setRows] = useState(null)
   const [families, setFamilies] = useState([])
@@ -472,6 +475,25 @@ function Students() {
     } else setPhotoUrls({})
   }, [])
   useEffect(() => { load() }, [load])
+  const [confirmDelete, setConfirmDelete] = useState(null)
+  const [deleting, setDeleting] = useState(false)
+  async function openDeleteConfirm(s) {
+    const [{ count: enrollCount }, { data: enrIds }] = await Promise.all([
+      supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('student_id', s.id),
+      supabase.from('enrollments').select('id').eq('student_id', s.id),
+    ])
+    let attendanceCount = 0
+    if (enrIds && enrIds.length) {
+      const { count } = await supabase.from('attendance').select('id', { count: 'exact', head: true }).in('enrollment_id', enrIds.map((e) => e.id))
+      attendanceCount = count || 0
+    }
+    setConfirmDelete({ ...s, enrollCount: enrollCount || 0, attendanceCount })
+  }
+  async function doDelete() {
+    setDeleting(true)
+    await supabase.from('students').delete().eq('id', confirmDelete.id)
+    setDeleting(false); setConfirmDelete(null); setEdit(null); load()
+  }
   async function uploadPhoto(s, e) {
     const file = e.target.files?.[0]; if (!file) return
     setBusyPhoto(s.id)
@@ -643,7 +665,33 @@ function Students() {
             <Field label="Last measured" type="date" value={edit.size_measured_on || ''} onChange={(e) => setEdit({ ...edit, size_measured_on: e.target.value })} />
             <Field label="Size notes" textarea value={edit.size_notes || ''} onChange={(e) => setEdit({ ...edit, size_notes: e.target.value })} />
           </div>
+          {edit.id && (
+            <div style={{ marginTop: 10, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+              <button className="btn danger small" onClick={() => openDeleteConfirm(edit)}>Delete this student permanently</button>
+            </div>
+          )}
         </Modal>
+      )}
+      {confirmDelete && (
+        <div className="overlay" onClick={() => setConfirmDelete(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><h2>Delete "{confirmDelete.first_name} {confirmDelete.last_name}"?</h2></div>
+            <div className="modal-body">
+              <p style={{ fontSize: 14.5 }}>This permanently deletes the student and cannot be undone. It will also permanently erase:</p>
+              <ul style={{ margin: '10px 0 10px 20px', fontSize: 14.5 }}>
+                <li><strong>{confirmDelete.enrollCount}</strong> enrollment record{confirmDelete.enrollCount !== 1 ? 's' : ''} (current and past classes)</li>
+                <li><strong>{confirmDelete.attendanceCount}</strong> attendance record{confirmDelete.attendanceCount !== 1 ? 's' : ''}</li>
+              </ul>
+              <p style={{ fontSize: 13.5, color: 'var(--ink-soft)' }}>If this student is just taking a season off, use <strong>Status: Inactive</strong> instead — that keeps all of this history safe and they can come back later.</p>
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setConfirmDelete(null)}>Cancel</button>
+              <button className="btn danger" onClick={doDelete} disabled={deleting} style={{ background: 'var(--danger)', color: '#fff', border: 'none' }}>
+                {deleting ? 'Deleting…' : 'Yes, permanently delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {viewing && (
         <div className="overlay" onClick={() => setViewing(null)}>
@@ -768,6 +816,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   async function addEnrollment() {
     setSaving(true)
     await supabase.from('enrollments').insert({ student_id: adding.student_id, class_id: adding.class_id, status: 'enrolled' })
+    await markStudentActive(adding.student_id)
     setSaving(false); setAdding(null); load()
   }
   async function setStatus(id, status) { await supabase.from('enrollments').update({ status }).eq('id', id); load() }
@@ -1024,28 +1073,19 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   )
 }
 
-// Enroll a student in every class named in the registration's
-// comma-joined interested_class text, auto-waitlisting any that are full.
-async function enrollInAllMatchedClasses(studentId, interestedClassText) {
-  if (!interestedClassText) return
-  const names = interestedClassText.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
-  const { data: cls } = await supabase.from('classes').select('id, name, capacity').eq('active', true)
-  for (const wanted of names) {
-    const match = (cls || []).find((c) => wanted.includes(c.name.toLowerCase()) || c.name.toLowerCase().includes(wanted))
-    if (!match) continue
-    let status = 'enrolled'
-    if (match.capacity) {
-      const { count } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', match.id).eq('status', 'enrolled')
-      if ((count ?? 0) >= match.capacity) status = 'waitlist'
-    }
-    await supabase.from('enrollments').insert({ student_id: studentId, class_id: match.id, status })
-  }
+// Students start Inactive by default (DB column default — see
+// migration-15.sql) and are moved to Active automatically the moment a
+// real enrollment (enrolled OR waitlisted — both mean "part of this
+// season") is created for them. Called from every place an enrollment
+// gets inserted, so nothing slips through.
+async function markStudentActive(studentId) {
+  await supabase.from('students').update({ season_status: 'active' }).eq('id', studentId)
 }
 
-// Same capacity-aware enrolling, but by real class ID rather than fuzzy
-// text matching — used when the class is picked directly from a list
-// (e.g. the Students screen's "Enroll in class" button), not typed at
-// registration.
+// Same capacity-aware enrolling logic used by the public registration
+// form, but by real class ID rather than fuzzy text matching — used when
+// the class is picked directly from a list (e.g. the Students screen's
+// "Enroll in class" button).
 async function enrollStudentInClass(studentId, classId, capacity) {
   let status = 'enrolled'
   if (capacity) {
@@ -1053,140 +1093,41 @@ async function enrollStudentInClass(studentId, classId, capacity) {
     if ((count ?? 0) >= capacity) status = 'waitlist'
   }
   await supabase.from('enrollments').insert({ student_id: studentId, class_id: classId, status })
+  await markStudentActive(studentId)
   return status
 }
 
-function normPhone(p) { return (p || '').replace(/\D/g, '') }
-
-// Confidence-scored match search for "returning student" registrations.
-// HIGH = student name matches AND (a parent name, phone, or email also matches).
-// LOW  = only the student's name matches — could easily be a different kid.
-async function findReturningMatches(r) {
-  const [sFirst, ...sRest] = (r.student_name || '').trim().split(' ')
-  const sLast = sRest.join(' ')
-  if (!sFirst) return []
-  let q = supabase.from('students').select('*, families(*)').ilike('first_name', sFirst)
-  if (sLast) q = q.ilike('last_name', `%${sLast}%`)
-  const { data: candidates } = await q
-  if (!candidates || !candidates.length) return []
-
-  const regPhones = [normPhone(r.phone), normPhone(r.secondary_parent_phone)].filter(Boolean)
-  const regEmails = [(r.email || '').toLowerCase().trim(), (r.secondary_parent_email || '').toLowerCase().trim()].filter(Boolean)
-  const regParentNames = [(r.parent_name || '').toLowerCase().trim(), (r.secondary_parent_name || '').toLowerCase().trim()].filter(Boolean)
-
-  return candidates.map((c) => {
-    const fam = c.families
-    let confidence = 'low'
-    if (fam) {
-      const famNames = [`${fam.parent_first_name} ${fam.parent_last_name}`.toLowerCase().trim(), (fam.secondary_parent_name || '').toLowerCase().trim()].filter(Boolean)
-      const famPhones = [normPhone(fam.phone), normPhone(fam.secondary_parent_phone)].filter(Boolean)
-      const famEmails = [(fam.email || '').toLowerCase().trim(), (fam.secondary_parent_email || '').toLowerCase().trim()].filter(Boolean)
-      const nameHit = famNames.some((n) => regParentNames.includes(n))
-      const phoneHit = regPhones.some((p) => famPhones.includes(p))
-      const emailHit = regEmails.some((e) => famEmails.includes(e))
-      if (nameHit || phoneHit || emailHit) confidence = 'high'
-    }
-    return { student: c, family: fam, confidence }
-  }).sort((a, b) => (a.confidence === 'high' ? -1 : 1) - (b.confidence === 'high' ? -1 : 1))
-}
-
-function Registrations({ onProcessed }) {
+function Registrations() {
+  // Registrations are now processed INSTANTLY at signup — the real family,
+  // student, and enrollment records already exist by the time a row shows
+  // up here. This screen is a LOG of what came in, not a queue needing
+  // approval. (If a registration ever fails to create real records — e.g.
+  // a network hiccup mid-submission — the fix is just to add that student
+  // manually via Students -> Add student, using the info shown here.)
   const [rows, setRows] = useState(null)
-  const [processing, setProcessing] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [matches, setMatches] = useState([])
-  const [matchesLoaded, setMatchesLoaded] = useState(false)
-  const [selectedMatchId, setSelectedMatchId] = useState('new')
+  const [q, setQ] = useState('')
   const load = useCallback(async () => {
-    const { data } = await supabase.from('registrations').select('*').eq('processed', false).order('submitted_date', { ascending: false })
+    const { data } = await supabase.from('registrations').select('*').order('submitted_date', { ascending: false }).limit(200)
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
-
-  async function openProcessing(r) {
-    setProcessing(r); setMatches([]); setMatchesLoaded(false); setSelectedMatchId('new')
-    if (r.is_returning) {
-      const found = await findReturningMatches(r)
-      setMatches(found)
-      // Pre-select the top match only if it's high confidence — never
-      // pre-select a low-confidence guess, that decision stays with Corrie.
-      setSelectedMatchId(found.length && found[0].confidence === 'high' ? found[0].student.id : 'new')
-    }
-    setMatchesLoaded(true)
-  }
-
-  // Create a brand-new family + student (today's original behavior).
-  async function createNew(r) {
-    const [firstName, ...rest] = (r.parent_name || '').trim().split(' ')
-    const { data: fam } = await supabase.from('families').insert({
-      parent_first_name: firstName || r.parent_name, parent_last_name: rest.join(' ') || '', email: r.email, phone: r.phone,
-      secondary_parent_name: r.secondary_parent_name || null,
-      secondary_parent_email: r.secondary_parent_email || null,
-      secondary_parent_phone: r.secondary_parent_phone || null,
-      emergency_contact_name: r.emergency_contact_name || null,
-      emergency_contact_relationship: r.emergency_contact_relationship || null,
-      emergency_contact_phone: r.emergency_contact_phone || null,
-      notes: r.wants_donation ? 'Registration donation intent noted at signup.' : null,
-    }).select().single()
-    const [sFirst, ...sRest] = (r.student_name || '').trim().split(' ')
-    const meetingNote = [
-      r.meeting_aug28 ? 'Aug 28 meeting' : null,
-      r.meeting_sep3 ? 'Sep 3 meeting' : null,
-    ].filter(Boolean).join(' + ')
-    const { data: stu } = await supabase.from('students').insert({
-      first_name: sFirst || r.student_name, last_name: sRest.join(' ') || '', grade: r.student_grade,
-      birthday: r.student_birthday || null, family_id: fam?.id || null,
-      notes: meetingNote ? `Parent meeting selected at registration: ${meetingNote}.` : null,
-    }).select().single()
-    if (stu) await enrollInAllMatchedClasses(stu.id, r.interested_class)
-  }
-
-  // Reuse an existing student + family Corrie confirmed is the same person.
-  // Only fills in BLANK fields — never overwrites data already on file.
-  async function mergeIntoExisting(match, r) {
-    const { student: stu, family: fam } = match
-    if (fam) {
-      const famUpdate = {}
-      if (!fam.secondary_parent_name && r.secondary_parent_name) famUpdate.secondary_parent_name = r.secondary_parent_name
-      if (!fam.secondary_parent_email && r.secondary_parent_email) famUpdate.secondary_parent_email = r.secondary_parent_email
-      if (!fam.secondary_parent_phone && r.secondary_parent_phone) famUpdate.secondary_parent_phone = r.secondary_parent_phone
-      if (!fam.emergency_contact_name && r.emergency_contact_name) famUpdate.emergency_contact_name = r.emergency_contact_name
-      if (!fam.emergency_contact_relationship && r.emergency_contact_relationship) famUpdate.emergency_contact_relationship = r.emergency_contact_relationship
-      if (!fam.emergency_contact_phone && r.emergency_contact_phone) famUpdate.emergency_contact_phone = r.emergency_contact_phone
-      if (Object.keys(famUpdate).length) await supabase.from('families').update(famUpdate).eq('id', fam.id)
-    }
-    if (!stu.birthday && r.student_birthday) await supabase.from('students').update({ birthday: r.student_birthday }).eq('id', stu.id)
-    await enrollInAllMatchedClasses(stu.id, r.interested_class)
-  }
-
-  async function process(r) {
-    setBusy(true)
-    if (selectedMatchId !== 'new') {
-      const match = matches.find((m) => m.student.id === selectedMatchId)
-      if (match) await mergeIntoExisting(match, r)
-      else await createNew(r)
-    } else {
-      await createNew(r)
-    }
-    await supabase.from('registrations').update({ processed: true }).eq('id', r.id)
-    setBusy(false); setProcessing(null); load(); onProcessed && onProcessed()
-  }
-  async function dismiss(id) { await supabase.from('registrations').update({ processed: true }).eq('id', id); load(); onProcessed && onProcessed() }
   if (!rows) return <div className="loading">Loading…</div>
+  const filtered = rows.filter((r) => `${r.parent_name} ${r.student_name}`.toLowerCase().includes(q.toLowerCase()))
   return (
     <>
-      <div className="page-head"><div><h1>New registrations</h1><p>Review each submission, then add the family to your roster.</p></div></div>
-      {rows.length === 0 ? (
-        <div className="card"><div className="empty"><h3>You're all caught up</h3><p>New registrations from the public site will show up here.</p></div></div>
+      <div className="page-head"><div><h1>Registrations</h1><p>Everyone who's registered through the website — already enrolled automatically. This is a log, not a queue; nothing here needs approval.</p></div></div>
+      <div className="toolbar"><input placeholder="Search by parent or student name…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+      {filtered.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No registrations yet</h3><p>Signups from the website show up here automatically.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Parent</th><th>Student</th><th>Interest</th><th>Meeting</th><th>Submitted</th><th></th></tr></thead>
+          <thead><tr><th>Parent</th><th>Student</th><th>Classes selected</th><th>Meeting</th><th>Submitted</th></tr></thead>
           <tbody>
-            {rows.map((r) => (
+            {filtered.map((r) => (
               <tr key={r.id}>
                 <td data-label="Parent"><strong>{r.parent_name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.email} {r.phone}</span></td>
-                <td data-label="Student">{r.student_name}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.student_grade}</span><br /><span className={`pill ${r.is_returning ? 'waitlist' : 'enrolled'}`} style={{ marginTop: 3, display: 'inline-block' }}>{r.is_returning ? 'Returning' : 'New'}</span></td>
-                <td data-label="Interest">{r.interested_class || '—'}</td>
+                <td data-label="Student">{r.student_name}<br /><span className={`pill ${r.is_returning ? 'waitlist' : 'enrolled'}`} style={{ marginTop: 3, display: 'inline-block' }}>{r.is_returning ? 'Returning' : 'New'}</span></td>
+                <td data-label="Classes selected">{r.interested_class || '—'}</td>
                 <td data-label="Meeting">
                   {r.meeting_aug28 && <span className="pill enrolled" style={{ marginRight: 4 }}>Aug 28</span>}
                   {r.meeting_sep3 && <span className="pill enrolled">Sep 3</span>}
@@ -1194,64 +1135,14 @@ function Registrations({ onProcessed }) {
                   {r.wants_donation && <><br /><span className="pill waitlist" style={{ marginTop: 4, display: 'inline-block' }} title="Checked the donation interest box at registration — this does not confirm a payment was made.">Donation interest</span></>}
                 </td>
                 <td data-label="Submitted">{new Date(r.submitted_date).toLocaleDateString()}</td>
-                <td><div className="row-actions">
-                  <button className="btn small" onClick={() => openProcessing(r)}>Add to roster</button>
-                  <button className="btn ghost small" onClick={() => dismiss(r.id)}>Dismiss</button>
-                </div></td>
               </tr>
             ))}
           </tbody>
         </table></div>
       )}
-      {processing && (
-        <Modal title="Add to roster" onClose={() => setProcessing(null)} onSave={() => process(processing)} saving={busy} saveLabel={selectedMatchId !== 'new' ? 'Enroll in existing record' : 'Create records'}>
-          {!matchesLoaded ? (
-            <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>Checking for an existing match…</p>
-          ) : (
-            <>
-              {processing.is_returning && matches.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <p style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>Marked as a returning student — possible matches found:</p>
-                  {matches.map((m) => (
-                    <label key={m.student.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 8, cursor: 'pointer', background: selectedMatchId === m.student.id ? 'var(--pine-soft, #e8f0ec)' : 'transparent' }}>
-                      <input type="radio" name="match" checked={selectedMatchId === m.student.id} onChange={() => setSelectedMatchId(m.student.id)} style={{ marginTop: 3 }} />
-                      <span style={{ fontSize: 14 }}>
-                        <strong>{m.student.first_name} {m.student.last_name}</strong>
-                        {m.family && <> — {m.family.parent_first_name} {m.family.parent_last_name}</>}
-                        <br />
-                        <span className={`pill ${m.confidence === 'high' ? 'enrolled' : 'waitlist'}`}>{m.confidence === 'high' ? 'High confidence' : 'Low confidence — name only'}</span>
-                      </span>
-                    </label>
-                  ))}
-                  <label style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 8, cursor: 'pointer', background: selectedMatchId === 'new' ? 'var(--pine-soft, #e8f0ec)' : 'transparent' }}>
-                    <input type="radio" name="match" checked={selectedMatchId === 'new'} onChange={() => setSelectedMatchId('new')} />
-                    <span style={{ fontSize: 14 }}>None of these — create a new student</span>
-                  </label>
-                </div>
-              )}
-              {processing.is_returning && matches.length === 0 && (
-                <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', marginBottom: 14 }}>Marked as returning, but no existing student with this name was found — this will create a new record.</p>
-              )}
-              <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>
-                {selectedMatchId !== 'new'
-                  ? <>This will enroll the <strong>existing</strong> student in {processing.interested_class ? <>every class matching "<strong>{processing.interested_class}</strong>."</> : 'the selected class(es).'} No new family or student record will be created — only blank fields (like a missing birthday or emergency contact) get filled in.</>
-                  : <>This creates a new family and student from <strong>{processing.parent_name}</strong>'s registration{processing.interested_class ? <> and enrolls them in every class matching "<strong>{processing.interested_class}</strong>."</> : '.'} You can fine-tune details afterward on the Families and Students screens.</>}
-              </p>
-              <div style={{ background: 'var(--cream)', borderRadius: 8, padding: 12, fontSize: 13.5, marginTop: 4 }}>
-                <div><strong>Dancer:</strong> {processing.student_name} {processing.student_birthday && `· born ${processing.student_birthday}`}</div>
-                {processing.secondary_parent_name && <div><strong>2nd parent:</strong> {processing.secondary_parent_name} {processing.secondary_parent_phone}</div>}
-                {processing.emergency_contact_name && <div><strong>Emergency contact:</strong> {processing.emergency_contact_name} ({processing.emergency_contact_relationship}) {processing.emergency_contact_phone}</div>}
-                <div><strong>Parent meeting:</strong> {[processing.meeting_aug28 && 'Aug 28', processing.meeting_sep3 && 'Sep 3'].filter(Boolean).join(', ') || 'none selected'}</div>
-                {processing.wants_donation && <div><strong>💛 Interested in a registration donation</strong> <span style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>(checked the box at signup — this only means they clicked, not that a payment was completed)</span></div>}
-              </div>
-            </>
-          )}
-        </Modal>
-      )}
     </>
   )
 }
-
 const BLANK_TEACHER = { name: '', email: '', phone: '', specialties: '', notes: '' }
 // Reusable "copy emails / email this group" control — same behavior as
 // Enrollments' group email (BCC, copy-to-clipboard, or send via Shine),
@@ -2353,7 +2244,10 @@ export default function App() {
   }, [session])
   const refreshRegCount = useCallback(async () => {
     if (isTeacher) return
-    const { count } = await supabase.from('registrations').select('id', { count: 'exact', head: true }).eq('processed', false)
+    // No longer "unprocessed" — everything auto-processes now. This shows
+    // recent signup activity instead, just informational, not a to-do.
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const { count } = await supabase.from('registrations').select('id', { count: 'exact', head: true }).gte('submitted_date', since)
     setNewRegCount(count ?? 0)
   }, [isTeacher])
   useEffect(() => { if (session && roleLoaded) refreshRegCount() }, [session, page, roleLoaded, refreshRegCount])
@@ -2390,7 +2284,7 @@ export default function App() {
         {safePage === 'privacy' && !isTeacher && <PrivacySettings />}
         {safePage === 'season' && !isTeacher && <SeasonRollover />}
         {safePage === 'rooms' && <Rooms />}
-        {safePage === 'registrations' && !isTeacher && <Registrations onProcessed={refreshRegCount} />}
+        {safePage === 'registrations' && !isTeacher && <Registrations />}
         {safePage === 'volunteers' && !isTeacher && <Volunteers />}
         {safePage === 'interest' && !isTeacher && <InterestList />}
         {safePage === 'teacher-access' && !isTeacher && <TeacherAccess />}
