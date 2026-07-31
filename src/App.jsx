@@ -2037,6 +2037,7 @@ function TeacherAccess() {
   const [teachers, setTeachers] = useState([])
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const load = useCallback(async () => {
     const [sr, t] = await Promise.all([
       supabase.from('staff_roles').select('*, teachers(name)').order('created_at'),
@@ -2047,14 +2048,34 @@ function TeacherAccess() {
   useEffect(() => { load() }, [load])
 
   async function save() {
-    setSaving(true)
+    setSaveErr('')
     const payload = { role: edit.role, teacher_id: edit.teacher_id || null, allowed_screens: edit.allowed_screens, display_name: edit.display_name || null, email: edit.email || null }
-    if (edit.isNew) await supabase.from('staff_roles').insert({ user_id: edit.user_id, ...payload })
-    else await supabase.from('staff_roles').update(payload).eq('user_id', edit.user_id)
-    setSaving(false); setEdit(null); load()
+    if (edit.isNew) {
+      // The User ID must be the UUID from Supabase -> Authentication -> Users,
+      // not an email address. Pasting the wrong thing used to fail silently:
+      // the modal closed, the list reloaded, and nothing appeared.
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      if (!uuidRe.test((edit.user_id || '').trim())) {
+        setSaveErr('That User ID doesn\'t look right. It needs to be the UUID from Supabase → Authentication → Users (a long code like 3f9a1c72-...), not an email address. Create the login there first, then copy the User UID column.')
+        return
+      }
+    }
+    setSaving(true)
+    const { error } = edit.isNew
+      ? await supabase.from('staff_roles').insert({ user_id: edit.user_id.trim(), ...payload })
+      : await supabase.from('staff_roles').update(payload).eq('user_id', edit.user_id)
+    setSaving(false)
+    if (error) {
+      console.error('Teacher Access save failed —', error)
+      setSaveErr(`Couldn't save: ${error.message}${error.hint ? ` (${error.hint})` : ''}`)
+      return // keep the modal open so the work isn't lost
+    }
+    setEdit(null); load()
   }
   async function remove(userId) {
-    await supabase.from('staff_roles').delete().eq('user_id', userId); load()
+    const { error } = await supabase.from('staff_roles').delete().eq('user_id', userId)
+    if (error) { console.error('Teacher Access delete failed —', error); alert(`Couldn't remove: ${error.message}`) }
+    load()
   }
   function toggleScreen(key) {
     setEdit((e) => ({ ...e, allowed_screens: e.allowed_screens.includes(key) ? e.allowed_screens.filter((k) => k !== key) : [...e.allowed_screens, key] }))
@@ -2087,7 +2108,12 @@ function TeacherAccess() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.isNew ? 'Add teacher login' : 'Edit access'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.isNew ? 'Add teacher login' : 'Edit access'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && (
+            <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 12 }}>
+              {saveErr}
+            </div>
+          )}
           {edit.isNew && (
             <>
               <Field label="User ID" value={edit.user_id} onChange={(e) => setEdit({ ...edit, user_id: e.target.value })} placeholder="Paste the UUID from Supabase → Authentication → Users" />
