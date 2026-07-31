@@ -6,6 +6,37 @@ import { supabase } from './supabaseClient'
    One file on purpose: easy to read top to bottom and hand off.
    ============================================================ */
 
+// Sends a BCC email from the Shine Gmail account.
+//
+// This calls a Netlify Function, NOT a Supabase Edge Function. Supabase's
+// edge runtime blocks outbound SMTP ports (25/465/587) at the platform
+// level, so Gmail sending could never work from there — the function would
+// hang and get killed with no error. Netlify does not block those ports.
+//
+// The logged-in user's Supabase access token is passed along so the
+// function can confirm the request came from a real staff login before it
+// sends anything (this replaces the "Verify JWT" setting the old edge
+// function had, which Netlify functions don't do automatically).
+async function sendFromShine({ subject, message, emails }) {
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session?.access_token) return { ok: false, error: 'Not signed in' }
+    const res = await fetch('/.netlify/functions/send-broadcast', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ subject, message, emails }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || data?.ok === false) return { ok: false, error: data?.error || `HTTP ${res.status}` }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) }
+  }
+}
+
 function Modal({ title, onClose, children, onSave, saving, saveLabel = 'Save' }) {
   return (
     <div className="overlay" onClick={onClose}>
@@ -911,9 +942,9 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   }
   async function sendViaShine() {
     setBcSending(true); setBcNote('')
-    const { data, error } = await supabase.functions.invoke('send-broadcast', { body: { subject: bcSubject, message: bcMessage, emails: broadcast.emails } })
+    const r = await sendFromShine({ subject: bcSubject, message: bcMessage, emails: broadcast.emails })
     setBcSending(false)
-    if (error || data?.ok === false) setBcNote('Could not send from Shine — is the email setup finished? "Open in my email app" always works.')
+    if (!r.ok) setBcNote(`Could not send from Shine (${r.error}) — "Open in my email app" always works.`)
     else { setBcNote('Sent ✓'); setTimeout(() => setBroadcast(null), 1400) }
   }
   async function printRoster() {
@@ -1133,6 +1164,67 @@ async function enrollStudentInClass(studentId, classId, capacity) {
   return status
 }
 
+// Simple RSVP roster for the two Mandatory Parent Meeting dates. Reads off
+// the same registrations already logged — no new data collection, just a
+// dedicated view Corrie can sort and print/screenshot before each meeting.
+// If this grows into recital ticket reservations or other one-off event
+// forms later, this is the natural first screen of a broader "Events"
+// section — kept small and single-purpose for now on purpose.
+function ParentMeetings() {
+  const [rows, setRows] = useState(null)
+  const sort = useSort('date')
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from('registrations')
+        .select('id, parent_name, student_name, email, phone, meeting_aug28, meeting_sep3')
+        .or('meeting_aug28.eq.true,meeting_sep3.eq.true')
+        .order('submitted_date', { ascending: false })
+      setRows(data || [])
+    })()
+  }, [])
+  if (!rows) return <div className="loading">Loading…</div>
+  // One row per meeting date selected — a family who checked both meetings
+  // appears once under each date, since that's genuinely two RSVPs.
+  const attendees = []
+  for (const r of rows) {
+    if (r.meeting_aug28) attendees.push({ ...r, dateLabel: 'Fri, Aug 28', dateSort: 1 })
+    if (r.meeting_sep3) attendees.push({ ...r, dateLabel: 'Wed, Sep 2', dateSort: 2 })
+  }
+  const sorted = applySort(attendees, sort, {
+    date: (a) => a.dateSort,
+    parent: (a) => a.parent_name?.toLowerCase(),
+    student: (a) => a.student_name?.toLowerCase(),
+  })
+  const countAug28 = attendees.filter((a) => a.dateSort === 1).length
+  const countSep2 = attendees.filter((a) => a.dateSort === 2).length
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Parent Meetings</h1>
+          <p>Who's coming to each Mandatory Parent Meeting, pulled straight from registrations. {countAug28} for Aug 28 · {countSep2} for Sep 2.</p>
+        </div>
+      </div>
+      {sorted.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No RSVPs yet</h3><p>Meeting selections from registration will show up here.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><SortTh label="Meeting date" sortKey="date" sort={sort} /><SortTh label="Parent" sortKey="parent" sort={sort} /><SortTh label="Student" sortKey="student" sort={sort} /><th>Contact</th></tr></thead>
+          <tbody>
+            {sorted.map((a, i) => (
+              <tr key={`${a.id}-${a.dateSort}-${i}`}>
+                <td data-label="Meeting date"><span className="pill enrolled">{a.dateLabel}</span></td>
+                <td data-label="Parent">{a.parent_name}</td>
+                <td data-label="Student">{a.student_name}</td>
+                <td data-label="Contact"><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{a.email} {a.phone}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+    </>
+  )
+}
 function Registrations() {
   // Registrations are now processed INSTANTLY at signup — the real family,
   // student, and enrollment records already exist by the time a row shows
@@ -1157,13 +1249,14 @@ function Registrations() {
         <div className="card"><div className="empty"><h3>No registrations yet</h3><p>Signups from the website show up here automatically.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Parent</th><th>Student</th><th>Classes selected</th><th>Meeting</th><th>Submitted</th></tr></thead>
+          <thead><tr><th>Parent</th><th>Student</th><th>Classes selected</th><th>Heard about us</th><th>Meeting</th><th>Submitted</th></tr></thead>
           <tbody>
             {filtered.map((r) => (
               <tr key={r.id}>
                 <td data-label="Parent"><strong>{r.parent_name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.email} {r.phone}</span></td>
                 <td data-label="Student">{r.student_name}<br /><span className={`pill ${r.is_returning ? 'waitlist' : 'enrolled'}`} style={{ marginTop: 3, display: 'inline-block' }}>{r.is_returning ? 'Returning' : 'New'}</span></td>
                 <td data-label="Classes selected">{r.interested_class || '—'}</td>
+                <td data-label="Heard about us">{r.heard_about || '—'}</td>
                 <td data-label="Meeting">
                   {r.meeting_aug28 && <span className="pill enrolled" style={{ marginRight: 4 }}>Aug 28</span>}
                   {r.meeting_sep3 && <span className="pill enrolled">Sep 3</span>}
@@ -1200,9 +1293,9 @@ function EmailGroupButton({ emails, label }) {
   }
   async function sendViaShine() {
     setBusy(true)
-    const { data, error } = await supabase.functions.invoke('send-broadcast', { body: { subject, message, emails } })
+    const r = await sendFromShine({ subject, message, emails })
     setBusy(false)
-    if (error || data?.ok === false) setNote('Could not send from Shine — "Open in my email app" always works.')
+    if (!r.ok) setNote(`Could not send from Shine (${r.error}) — "Open in my email app" always works.`)
     else { setNote('Sent ✓'); setTimeout(() => setOpen(false), 1200) }
   }
   return (
@@ -2301,6 +2394,7 @@ const NAV = [
   { key: 'privacy', label: 'Privacy Settings' },
   { key: 'season', label: 'New Season' },
   { key: 'registrations', label: 'Registrations' },
+  { key: 'parent-meetings', label: 'Parent Meetings' },
   { key: 'volunteers', label: 'Volunteers' },
   { key: 'interest', label: 'Interest List' },
 ]
@@ -2382,6 +2476,7 @@ export default function App() {
         {safePage === 'season' && !isTeacher && <SeasonRollover />}
         {safePage === 'rooms' && <Rooms />}
         {safePage === 'registrations' && !isTeacher && <Registrations />}
+        {safePage === 'parent-meetings' && !isTeacher && <ParentMeetings />}
         {safePage === 'volunteers' && !isTeacher && <Volunteers />}
         {safePage === 'interest' && !isTeacher && <InterestList />}
         {safePage === 'teacher-access' && !isTeacher && <TeacherAccess />}
