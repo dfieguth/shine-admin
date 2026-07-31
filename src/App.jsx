@@ -1164,6 +1164,78 @@ async function enrollStudentInClass(studentId, classId, capacity) {
   return status
 }
 
+// A small, curated set of public-site text fields Corrie can edit herself —
+// deliberately NOT an open page-builder. Each field here maps to one
+// specific hardcoded default in shine-public's code; if a key is ever
+// missing from the database, the public site falls back to that default
+// automatically, so this screen can never take the site down or leave a
+// section blank.
+const SITE_CONTENT_FIELDS = [
+  { key: 'hero_headline', label: 'Homepage headline', where: 'Homepage — top banner' },
+  { key: 'hero_subtext', label: 'Homepage subheading', where: 'Homepage — top banner', textarea: true },
+  { key: 'hero_verse', label: 'Bible verse under the headline', where: 'Homepage — top banner', textarea: true },
+  { key: 'donation_badge', label: 'Donation callout text', where: 'Homepage — top banner', textarea: true },
+  { key: 'mission_headline', label: 'Mission section headline', where: 'Homepage — "Why Shine" section' },
+  { key: 'mission_body', label: 'Mission section paragraph', where: 'Homepage — "Why Shine" section', textarea: true },
+  { key: 'mission_chip_level', label: 'Skill-level chip (e.g. "Beginning to advanced")', where: 'Homepage — "Why Shine" section' },
+  { key: 'registration_intro', label: 'Registration form intro paragraph', where: 'Registration form', textarea: true },
+  { key: 'class_select_label', label: 'Class selection instructions', where: 'Registration form' },
+  { key: 'not_sure_label', label: '"I\'m not sure" checkbox text', where: 'Registration form' },
+  { key: 'meeting_aug28_label', label: 'First parent meeting — date, time, room', where: 'Registration form + confirmation email', textarea: true },
+  { key: 'meeting_sep3_label', label: 'Second parent meeting — date, time, room', where: 'Registration form + confirmation email', textarea: true },
+]
+
+function SiteContent() {
+  const [values, setValues] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [savedNote, setSavedNote] = useState('')
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('site_content').select('key, value')
+    const map = {}
+    for (const row of data || []) map[row.key] = row.value
+    setValues(map)
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function saveAll() {
+    setSaving(true); setSavedNote('')
+    const rows = SITE_CONTENT_FIELDS.map((f) => ({ key: f.key, value: values[f.key] ?? '', updated_at: new Date().toISOString() }))
+    await supabase.from('site_content').upsert(rows, { onConflict: 'key' })
+    setSaving(false); setSavedNote('Saved ✓'); setTimeout(() => setSavedNote(''), 2500)
+  }
+  if (!values) return <div className="loading">Loading…</div>
+  const grouped = SITE_CONTENT_FIELDS.reduce((acc, f) => {
+    (acc[f.where] = acc[f.where] || []).push(f)
+    return acc
+  }, {})
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>Site Content</h1>
+          <p>A curated set of text on the public site you can edit yourself, no code push needed. Meeting dates/times here are the SAME text used in the confirmation email — change it once here and both places update together.</p>
+        </div>
+        <button className="btn" onClick={saveAll} disabled={saving}>{saving ? 'Saving…' : 'Save all changes'}</button>
+      </div>
+      {savedNote && <div style={{ color: 'var(--brass)', fontWeight: 600, marginBottom: 14 }}>{savedNote}</div>}
+      {Object.entries(grouped).map(([where, fields]) => (
+        <div className="card" key={where} style={{ marginBottom: 18 }}>
+          <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: 15 }}>{where}</h3>
+          {fields.map((f) => (
+            <Field
+              key={f.key}
+              label={f.label}
+              textarea={f.textarea}
+              value={values[f.key] ?? ''}
+              onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+              style={f.textarea ? { minHeight: 70 } : undefined}
+            />
+          ))}
+        </div>
+      ))}
+    </>
+  )
+}
+
 // Simple RSVP roster for the two Mandatory Parent Meeting dates. Reads off
 // the same registrations already logged — no new data collection, just a
 // dedicated view Corrie can sort and print/screenshot before each meeting.
@@ -2391,6 +2463,7 @@ const NAV = [
   { key: 'testimonials', label: 'Testimonials' },
   { key: 'announcements', label: 'Announcements' },
   { key: 'policies', label: 'Policies & Forms' },
+  { key: 'site-content', label: 'Site Content' },
   { key: 'privacy', label: 'Privacy Settings' },
   { key: 'season', label: 'New Season' },
   { key: 'registrations', label: 'Registrations' },
@@ -2472,6 +2545,7 @@ export default function App() {
         {safePage === 'testimonials' && <Testimonials />}
         {safePage === 'announcements' && <Announcements />}
         {safePage === 'policies' && <Policies />}
+        {safePage === 'site-content' && !isTeacher && <SiteContent />}
         {safePage === 'privacy' && !isTeacher && <PrivacySettings />}
         {safePage === 'season' && !isTeacher && <SeasonRollover />}
         {safePage === 'rooms' && <Rooms />}
