@@ -104,6 +104,7 @@ function Field({ label, ...props }) {
 function AuthScreen() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showPw, setShowPw] = useState(false)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   async function signIn() {
@@ -121,7 +122,23 @@ function AuthScreen() {
         <div className="field"><label>Email</label>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && signIn()} /></div>
         <div className="field"><label>Password</label>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && signIn()} /></div>
+          <div style={{ position: 'relative' }}>
+            <input
+              type={showPw ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && signIn()}
+              style={{ paddingRight: 56, width: '100%' }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPw((s) => !s)}
+              style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--ink-soft)', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', padding: '4px 6px' }}
+            >
+              {showPw ? 'Hide' : 'Show'}
+            </button>
+          </div>
+        </div>
         <button className="btn" onClick={signIn} disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
       </div>
     </div>
