@@ -1306,25 +1306,51 @@ function Registrations() {
   // manually via Students -> Add student, using the info shown here.)
   const [rows, setRows] = useState(null)
   const [q, setQ] = useState('')
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [clearing, setClearing] = useState(false)
   const load = useCallback(async () => {
     const { data } = await supabase.from('registrations').select('*').order('submitted_date', { ascending: false }).limit(200)
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
+  function toggleSelect(id) {
+    setSelectedIds((s) => { const next = new Set(s); next.has(id) ? next.delete(id) : next.add(id); return next })
+  }
+  function toggleSelectAll(visibleIds) {
+    setSelectedIds((s) => (visibleIds.every((id) => s.has(id)) ? new Set() : new Set(visibleIds)))
+  }
+  async function clearSelected() {
+    if (!selectedIds.size) return
+    if (!confirm(`Clear ${selectedIds.size} registration${selectedIds.size > 1 ? 's' : ''} from this log? This only removes the log entry — it does NOT touch any student, family, or enrollment record already created.`)) return
+    setClearing(true)
+    await supabase.from('registrations').delete().in('id', [...selectedIds])
+    setSelectedIds(new Set())
+    setClearing(false)
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = rows.filter((r) => `${r.parent_name} ${r.student_name}`.toLowerCase().includes(q.toLowerCase()))
   return (
     <>
-      <div className="page-head"><div><h1>Registrations</h1><p>Everyone who's registered through the website — already enrolled automatically. This is a log, not a queue; nothing here needs approval.</p></div></div>
-      <div className="toolbar"><input placeholder="Search by parent or student name…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+      <div className="page-head"><div><h1>Registrations</h1><p>Everyone who's registered through the website — already enrolled automatically. This is a log, not a queue; nothing here needs approval. Clearing entries here only tidies this log — it never touches the actual student, family, or enrollment records.</p></div></div>
+      <div className="toolbar">
+        <input placeholder="Search by parent or student name…" value={q} onChange={(e) => setQ(e.target.value)} />
+        {selectedIds.size > 0 && (
+          <>
+            <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{selectedIds.size} selected</span>
+            <button className="btn danger small" onClick={clearSelected} disabled={clearing}>{clearing ? 'Clearing…' : 'Clear selected'}</button>
+          </>
+        )}
+      </div>
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No registrations yet</h3><p>Signups from the website show up here automatically.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Parent</th><th>Student</th><th>Classes selected</th><th>Heard about us</th><th>Meeting</th><th>Submitted</th></tr></thead>
+          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id))} onChange={() => toggleSelectAll(filtered.map((r) => r.id))} /></th><th>Parent</th><th>Student</th><th>Classes selected</th><th>Heard about us</th><th>Meeting</th><th>Submitted</th></tr></thead>
           <tbody>
             {filtered.map((r) => (
               <tr key={r.id}>
+                <td><input type="checkbox" checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} /></td>
                 <td data-label="Parent"><strong>{r.parent_name}</strong><br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.email} {r.phone}</span></td>
                 <td data-label="Student">{r.student_name}<br /><span className={`pill ${r.is_returning ? 'waitlist' : 'enrolled'}`} style={{ marginTop: 3, display: 'inline-block' }}>{r.is_returning ? 'Returning' : 'New'}</span></td>
                 <td data-label="Classes selected">{r.interested_class || '—'}</td>
@@ -2507,13 +2533,24 @@ export default function App() {
   }, [session])
   const refreshRegCount = useCallback(async () => {
     if (isTeacher) return
-    // No longer "unprocessed" — everything auto-processes now. This shows
-    // recent signup activity instead, just informational, not a to-do.
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const { count } = await supabase.from('registrations').select('id', { count: 'exact', head: true }).gte('submitted_date', since)
+    // Counts registrations since this browser last opened the Registrations
+    // screen, not a fixed rolling window — so the badge actually clears when
+    // you look at it, instead of just sitting there showing recent activity.
+    // Falls back to 24 hours the very first time (nothing stored yet).
+    const stored = localStorage.getItem('shine_registrations_last_viewed')
+    const since = stored || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const { count } = await supabase.from('registrations').select('id', { count: 'exact', head: true }).gt('submitted_date', since)
     setNewRegCount(count ?? 0)
   }, [isTeacher])
   useEffect(() => { if (session && roleLoaded) refreshRegCount() }, [session, page, roleLoaded, refreshRegCount])
+  // Opening Registrations marks everything as seen right away — badge
+  // clears instantly rather than waiting on the next poll.
+  useEffect(() => {
+    if (page === 'registrations') {
+      localStorage.setItem('shine_registrations_last_viewed', new Date().toISOString())
+      setNewRegCount(0)
+    }
+  }, [page])
   if (session === undefined) return <div className="loading">Loading…</div>
   if (!session) return <AuthScreen />
   if (!roleLoaded) return <div className="loading">Loading…</div>
