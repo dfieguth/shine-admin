@@ -191,7 +191,7 @@ function Classes({ onOpenRoster }) {
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [seasonFilter, setSeasonFilter] = useState('')
-  const sort = useSort('day')
+  const sort = useSort('class')
   const [clsErr, setClsErr] = useState('')
   const [viewingClass, setViewingClass] = useState(null)
   const [rooms, setRooms] = useState([])
@@ -258,8 +258,13 @@ function Classes({ onOpenRoster }) {
   const allSeasons = [...new Set(rows.map((c) => c.season || 'unlabeled'))]
   let visible = seasonFilter ? rows.filter((c) => (c.season || 'unlabeled') === seasonFilter) : rows
   visible = applySort(visible, sort, {
-    day: (c) => CLASS_DAY_ORDER.indexOf(c.day_of_week),
-    class: (c) => (c.name || '').toLowerCase(),
+    // Compound sort keys: primary field first, then a zero-padded day index
+    // as a tiebreaker, so classes with the same name group together in
+    // calendar day order instead of database-insert order. This is the fix
+    // for "classes aren't in any particular order" — sorting by Name is now
+    // the default view.
+    day: (c) => `${String(CLASS_DAY_ORDER.indexOf(c.day_of_week)).padStart(2, '0')}__${(c.name || '').toLowerCase()}`,
+    class: (c) => `${(c.name || '').toLowerCase()}__${String(CLASS_DAY_ORDER.indexOf(c.day_of_week)).padStart(2, '0')}`,
     level: (c) => (c.level || '').toLowerCase(),
     room: (c) => (c.rooms?.name || '').toLowerCase(),
     teacher: (c) => (c.teachers?.name || c.instructor_name || '').toLowerCase(),
