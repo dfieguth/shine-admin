@@ -651,6 +651,7 @@ function Students() {
       grade: (s) => s.grade || '',
       level: (s) => s.level || '',
       family: (s) => s.families ? `${s.families.parent_last_name} ${s.families.parent_first_name}`.toLowerCase() : '',
+      registered: (s) => s.registered_at || '',
     }
   )
   return (
@@ -680,7 +681,7 @@ function Students() {
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><th></th></tr></thead>
+          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><SortTh label="Registered" sortKey="registered" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
@@ -697,6 +698,7 @@ function Students() {
                 <td data-label="Level">{s.level || '—'}</td>
                 <td data-label="Classes" style={{ fontSize: 13 }}>{(enrollMap[s.id] || []).length ? enrollMap[s.id].join(', ') : <span style={{ color: 'var(--ink-soft)' }}>—</span>}</td>
                 <td data-label="Family">{s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : '—'}</td>
+                <td data-label="Registered">{s.registered_at ? new Date(s.registered_at).toLocaleDateString() : '—'}</td>
                 <td><div className="row-actions">
                   <label className="btn ghost small" style={{ cursor: 'pointer' }}>
                     {busyPhoto === s.id ? 'Uploading…' : 'Photo'}
@@ -797,6 +799,7 @@ function Students() {
               <div className="vp-row"><span>Level</span><span>{viewing.level || '—'}</span></div>
               <div className="vp-row"><span>Birthday</span><span>{viewing.birthday || '—'}</span></div>
               <div className="vp-row"><span>Classes</span><span>{(enrollMap[viewing.id] || []).join(', ') || '—'}</span></div>
+              <div className="vp-row"><span>Registered</span><span>{viewing.registered_at ? new Date(viewing.registered_at).toLocaleDateString() : '—'}</span></div>
 
               <p className="vp-section">Family</p>
               {viewing.families ? (
