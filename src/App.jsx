@@ -1518,6 +1518,8 @@ function Attendance({ myTeacherId }) {
   const [roster, setRoster] = useState(null)
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
+  const [period, setPeriod] = useState({ start: '', end: '' })
+  const [editingPeriod, setEditingPeriod] = useState(false)
 
   useEffect(() => {
     (async () => {
@@ -1528,9 +1530,24 @@ function Attendance({ myTeacherId }) {
     })()
   }, [myTeacherId])
 
+  const loadPeriod = useCallback(async () => {
+    const { data } = await supabase.from('site_content').select('key, value').in('key', ['attendance_period_start', 'attendance_period_end'])
+    const map = {}
+    for (const row of data || []) map[row.key] = row.value
+    setPeriod({ start: map.attendance_period_start || '', end: map.attendance_period_end || '' })
+  }, [])
+  useEffect(() => { loadPeriod() }, [loadPeriod])
+  async function savePeriod() {
+    await supabase.from('site_content').upsert([
+      { key: 'attendance_period_start', value: period.start },
+      { key: 'attendance_period_end', value: period.end },
+    ], { onConflict: 'key' })
+    setEditingPeriod(false)
+  }
+
   const loadRoster = useCallback(async () => {
     if (!classId || !date) { setRoster(null); return }
-    const { data: enr } = await supabase.from('enrollments').select('id, students(first_name, last_name)').eq('class_id', classId).eq('status', 'enrolled')
+    const { data: enr } = await supabase.from('enrollments').select('id, students(id, first_name, last_name, families(email, parent_first_name, parent_last_name))').eq('class_id', classId).eq('status', 'enrolled')
     const ids = (enr || []).map((e) => e.id)
     const existing = {}
     if (ids.length) {
@@ -1539,7 +1556,9 @@ function Attendance({ myTeacherId }) {
     }
     setRoster((enr || []).map((e) => ({
       enrollment_id: e.id,
+      student_id: e.students?.id,
       name: e.students ? `${e.students.first_name} ${e.students.last_name}` : '—',
+      parentEmail: e.students?.families?.email || '',
       status: existing[e.id] ?? '',
     })))
   }, [classId, date])
@@ -1548,6 +1567,45 @@ function Attendance({ myTeacherId }) {
   // Tap cycles: unmarked → present → tardy → absent → unmarked
   const NEXT = { '': 'present', present: 'tardy', tardy: 'absent', absent: '' }
   function toggle(id) { setRoster(roster.map((r) => r.enrollment_id === id ? { ...r, status: NEXT[r.status] } : r)) }
+
+  // Checks one student's tardy/absent counts for the current period against
+  // the 2nd/3rd thresholds. attendance_alerts_sent guarantees each alert
+  // fires exactly once per student per threshold per period, no matter how
+  // many times attendance gets corrected — the insert is the lock: if a row
+  // for this (student, alert_type, period) already exists, the insert fails
+  // on the unique constraint and no duplicate email goes out.
+  async function checkAlertsForStudent(r) {
+    if (!period.start || !period.end || !r.student_id) return
+    const { data: enrRows } = await supabase.from('enrollments').select('id').eq('student_id', r.student_id)
+    const enrIds = (enrRows || []).map((e) => e.id)
+    if (!enrIds.length) return
+    const { data: attRows } = await supabase.from('attendance').select('status')
+      .in('enrollment_id', enrIds).gte('class_date', period.start).lte('class_date', period.end)
+    const tardyCount = (attRows || []).filter((a) => a.status === 'tardy').length
+    const absentCount = (attRows || []).filter((a) => a.status === 'absent').length
+    const checks = [
+      ['tardy_2', tardyCount >= 2, 'tardy', 2],
+      ['tardy_3', tardyCount >= 3, 'tardy', 3],
+      ['absent_2', absentCount >= 2, 'absent', 2],
+      ['absent_3', absentCount >= 3, 'absent', 3],
+    ]
+    for (const [alertType, hitThreshold, word, n] of checks) {
+      if (!hitThreshold) continue
+      const { error: lockErr } = await supabase.from('attendance_alerts_sent').insert({ student_id: r.student_id, alert_type: alertType, period_start: period.start })
+      if (lockErr) continue // already sent this one — unique constraint blocked the duplicate
+      const ord = n === 2 ? '2nd' : '3rd'
+      const parentName = r.name.split(' ')[0]
+      const subject = `Attendance alert: ${r.name} — ${ord} ${word}`
+      const message = [
+        `Hi ${parentName || 'there'},`, '',
+        `This is a note that ${r.name} has reached their ${ord} ${word} of the current period (${period.start} to ${period.end}).`,
+        n === 3 ? 'Please reach out if there is anything we can help with.' : '',
+        '', 'Grace and Peace,', 'Corrie / Shine Dance Studio',
+      ].filter(Boolean).join('\n')
+      const recipients = [r.parentEmail, 'shineGHFC@gmail.com'].filter(Boolean)
+      if (recipients.length) await sendFromShine({ subject, message, emails: recipients })
+    }
+  }
 
   async function save() {
     setSaving(true)
@@ -1561,6 +1619,9 @@ function Attendance({ myTeacherId }) {
       })))
     }
     setSaving(false); setSavedMsg('Saved ✓'); setTimeout(() => setSavedMsg(''), 2500)
+    // Fire-and-forget: alert checks run after save confirms, don't block the
+    // "Saved" message on email sending.
+    for (const r of roster.filter((r) => r.status === 'tardy' || r.status === 'absent')) checkAlertsForStudent(r)
   }
 
   const presentCount = roster ? roster.filter((r) => r.status === 'present' || r.status === 'tardy').length : 0
@@ -1569,6 +1630,29 @@ function Attendance({ myTeacherId }) {
   return (
     <>
       <div className="page-head"><div><h1>Attendance</h1><p>Pick a class and a date, check off who's here, save.</p></div></div>
+      {!myTeacherId && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          {!editingPeriod ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13.5 }}>
+                <strong>Attendance alert period:</strong>{' '}
+                {period.start && period.end ? `${period.start} to ${period.end}` : <span style={{ color: '#b23838' }}>not set — 2nd/3rd tardy/absence alerts are OFF until this is set</span>}
+              </span>
+              <button className="btn ghost small" onClick={() => setEditingPeriod(true)}>{period.start ? 'Change period' : 'Set period'}</button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <label style={{ fontSize: 13 }}>Start <input type="date" value={period.start} onChange={(e) => setPeriod({ ...period, start: e.target.value })} /></label>
+              <label style={{ fontSize: 13 }}>End <input type="date" value={period.end} onChange={(e) => setPeriod({ ...period, end: e.target.value })} /></label>
+              <button className="btn small" onClick={savePeriod}>Save period</button>
+              <button className="btn ghost small" onClick={() => setEditingPeriod(false)}>Cancel</button>
+            </div>
+          )}
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: 8, marginBottom: 0 }}>
+            2nd/3rd tardy and 2nd/3rd absence alerts email the parent (and shineGHFC@gmail.com) automatically, counted within this date range only. Update this at the start of each new semester — each alert only ever sends once per student per threshold per period, so changing the dates here starts a fresh count.
+          </p>
+        </div>
+      )}
       <div className="toolbar">
         <select value={classId} onChange={(e) => setClassId(e.target.value)}>
           <option value="">— choose a class —</option>
@@ -2340,13 +2424,24 @@ function Volunteers() {
   function toggleAssignRole(role) {
     setAssignRoles((r) => r.includes(role) ? r.filter((x) => x !== role) : [...r, role])
   }
+  const [assignErr, setAssignErr] = useState('')
   async function confirmAssign() {
-    setAssignBusy(true)
-    await supabase.from('volunteers').insert({
+    setAssignBusy(true); setAssignErr('')
+    const { error: rosterErr } = await supabase.from('volunteers').insert({
       name: assigning.name, email: assigning.email, phone: assigning.phone,
       roles: assignRoles, active: true, notes: assigning.message || null,
     })
-    await supabase.from('volunteer_inquiries').update({ processed: true }).eq('id', assigning.id)
+    if (rosterErr) {
+      console.error('Volunteers: add to roster failed —', rosterErr)
+      setAssignErr(`Couldn't add to roster: ${rosterErr.message}`)
+      setAssignBusy(false)
+      return // inquiry is NOT marked processed — nothing is lost, modal stays open
+    }
+    // Only dismiss the inquiry once the roster entry is confirmed to exist —
+    // this is the fix for the disappearing-inquiry bug: before, the inquiry
+    // got marked processed regardless of whether the roster insert worked.
+    const { error: dismissErr } = await supabase.from('volunteer_inquiries').update({ processed: true }).eq('id', assigning.id)
+    if (dismissErr) console.error('Volunteers: dismissing inquiry after roster add failed —', dismissErr)
     setAssignBusy(false); setAssigning(null); setAssignRoles([]); loadInquiries(); loadRoster()
   }
 
@@ -2452,7 +2547,8 @@ function Volunteers() {
       )}
 
       {assigning && (
-        <Modal title="Add to roster" onClose={() => setAssigning(null)} onSave={confirmAssign} saving={assignBusy} saveLabel="Add to roster">
+        <Modal title="Add to roster" onClose={() => { setAssigning(null); setAssignErr('') }} onSave={confirmAssign} saving={assignBusy} saveLabel="Add to roster">
+          {assignErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 12 }}>{assignErr}</div>}
           <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>Adding <strong>{assigning.name}</strong> to the active volunteer roster. Pick their role(s):</p>
           {VOLUNTEER_ROLES.map((r) => (
             <label key={r} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '7px 0', cursor: 'pointer' }}>
