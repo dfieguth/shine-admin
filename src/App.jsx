@@ -573,6 +573,28 @@ function Students() {
     await supabase.from('students').update({ season_status: status }).in('id', [...selectedIds])
     setBulkBusy(false); setSelectedIds(new Set()); load()
   }
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(null)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+  function selectAllInactive() {
+    setSelectedIds(new Set((rows || []).filter((r) => r.season_status === 'inactive').map((r) => r.id)))
+  }
+  async function openBulkDeleteConfirm() {
+    if (!selectedIds.size) return
+    const ids = [...selectedIds]
+    const { count: enrollCount } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).in('student_id', ids)
+    const { data: enrIds } = await supabase.from('enrollments').select('id').in('student_id', ids)
+    let attendanceCount = 0
+    if (enrIds && enrIds.length) {
+      const { count } = await supabase.from('attendance').select('id', { count: 'exact', head: true }).in('enrollment_id', enrIds.map((e) => e.id))
+      attendanceCount = count || 0
+    }
+    setBulkDeleteConfirm({ count: ids.length, enrollCount: enrollCount || 0, attendanceCount })
+  }
+  async function doBulkDelete() {
+    setBulkDeleting(true)
+    await supabase.from('students').delete().in('id', [...selectedIds])
+    setBulkDeleting(false); setBulkDeleteConfirm(null); setSelectedIds(new Set()); load()
+  }
   async function uploadPhoto(s, e) {
     const file = e.target.files?.[0]; if (!file) return
     setBusyPhoto(s.id)
@@ -667,16 +689,35 @@ function Students() {
           <option value="inactive">Inactive only</option>
           <option value="all">All students</option>
         </select>
+        <button className="btn ghost small" onClick={selectAllInactive}>Select all Inactive</button>
         {selectedIds.size > 0 && (
           <>
             <div className="spacer" />
             <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{selectedIds.size} selected</span>
             <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('inactive')}>Mark Inactive</button>
             <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('active')}>Mark Active</button>
+            <button className="btn danger small" disabled={bulkBusy} onClick={openBulkDeleteConfirm}>Delete selected</button>
             <button className="btn ghost small" onClick={() => setSelectedIds(new Set())}>Clear</button>
           </>
         )}
       </div>
+      {bulkDeleteConfirm && (
+        <Modal
+          title="Delete selected students?"
+          onClose={() => setBulkDeleteConfirm(null)}
+          onSave={doBulkDelete}
+          saving={bulkDeleting}
+          saveLabel={bulkDeleting ? 'Deleting…' : `Delete ${bulkDeleteConfirm.count} student${bulkDeleteConfirm.count > 1 ? 's' : ''}`}
+        >
+          <p style={{ fontSize: 14.5 }}>
+            This permanently deletes <strong>{bulkDeleteConfirm.count}</strong> student{bulkDeleteConfirm.count > 1 ? 's' : ''},
+            along with <strong>{bulkDeleteConfirm.enrollCount}</strong> enrollment{bulkDeleteConfirm.enrollCount === 1 ? '' : 's'} and{' '}
+            <strong>{bulkDeleteConfirm.attendanceCount}</strong> attendance record{bulkDeleteConfirm.attendanceCount === 1 ? '' : 's'} tied to them.
+            This cannot be undone.
+          </p>
+          <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Family records for these students are NOT deleted — only the student records themselves.</p>
+        </Modal>
+      )}
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
