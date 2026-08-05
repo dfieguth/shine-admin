@@ -2302,6 +2302,7 @@ function SeasonRollover() {
   const [seasons, setSeasons] = useState([])
   const [targetSeason, setTargetSeason] = useState(currentSeasonLabel())
   const [selected, setSelected] = useState({})
+  const [retireSource, setRetireSource] = useState(true)
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState('')
 
@@ -2332,8 +2333,27 @@ function SeasonRollover() {
       min_age: c.min_age, max_age: c.max_age, active: true, season: targetSeason,
     }))
     if (payload.length) await supabase.from('classes').insert(payload)
+    // This is the actual fix for the leftover-active-old-season-class bug:
+    // rolling forward never used to touch the SOURCE season's active flag,
+    // so last season's classes silently stayed visible to parents on the
+    // public registration form (which filters by active, not by season)
+    // until someone remembered to retire each one by hand. Retiring the
+    // whole source season here closes that gap at the point it's created,
+    // instead of relying on it being caught later.
+    let retiredCount = 0
+    if (retireSource && sourceClasses.length) {
+      const stillActive = sourceClasses.filter((c) => c.active)
+      if (stillActive.length) {
+        await supabase.from('classes').update({ active: false }).in('id', stillActive.map((c) => c.id))
+        retiredCount = stillActive.length
+      }
+    }
     setRunning(false)
-    setResult(`Copied ${payload.length} class${payload.length !== 1 ? 'es' : ''} into ${targetSeason}. Students were NOT auto-enrolled — re-enroll returning students in the new season's classes via Enrollments.`)
+    setResult(
+      `Copied ${payload.length} class${payload.length !== 1 ? 'es' : ''} into ${targetSeason}.` +
+      (retiredCount ? ` Also retired ${retiredCount} class${retiredCount !== 1 ? 'es' : ''} from ${sourceSeason} so they no longer show up on the public registration form.` : '') +
+      ` Students were NOT auto-enrolled — re-enroll returning students in the new season's classes via Enrollments.`
+    )
     load()
   }
 
@@ -2342,6 +2362,10 @@ function SeasonRollover() {
     <>
       <div className="page-head"><div><h1>New Season Rollover</h1><p>Copy last season's classes forward instead of re-entering them by hand each year.</p></div></div>
       <div className="card card-pad" style={{ marginBottom: 20 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, marginBottom: 14, cursor: 'pointer' }}>
+          <input type="checkbox" checked={retireSource} onChange={(e) => setRetireSource(e.target.checked)} />
+          <span>Also retire {sourceSeason || 'the previous season'}'s classes when I run this — recommended, prevents old classes from silently staying visible to parents on the registration form.</span>
+        </label>
         <p style={{ fontSize: 14, color: 'var(--ink-soft)', marginBottom: 14 }}>
           This copies the class SHAPE (name, day, time, location, instructor, capacity, age range) into a new season as fresh, empty classes.
           It deliberately does <strong>not</strong> copy enrollments — each year's roster should be a deliberate choice, not an assumption
