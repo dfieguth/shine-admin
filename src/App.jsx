@@ -671,6 +671,7 @@ function Students() {
     {
       name: (s) => `${s.last_name} ${s.first_name}`.toLowerCase(),
       grade: (s) => s.grade || '',
+      age: (s) => s.age || '',
       level: (s) => s.level || '',
       family: (s) => s.families ? `${s.families.parent_last_name} ${s.families.parent_first_name}`.toLowerCase() : '',
       registered: (s) => s.registered_at || '',
@@ -722,7 +723,7 @@ function Students() {
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><SortTh label="Registered" sortKey="registered" sort={sort} /><th></th></tr></thead>
+          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Age" sortKey="age" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><SortTh label="Registered" sortKey="registered" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
@@ -736,6 +737,7 @@ function Students() {
                   </div>
                 </td>
                 <td data-label="Grade">{s.grade || '—'}</td>
+                <td data-label="Age">{s.age || '—'}</td>
                 <td data-label="Level">{s.level || '—'}</td>
                 <td data-label="Classes" style={{ fontSize: 13 }}>{(enrollMap[s.id] || []).length ? enrollMap[s.id].join(', ') : <span style={{ color: 'var(--ink-soft)' }}>—</span>}</td>
                 <td data-label="Family">{s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : '—'}</td>
@@ -763,6 +765,7 @@ function Students() {
           </div>
           <div className="field row2">
             <Field label="Grade" value={edit.grade || ''} onChange={(e) => setEdit({ ...edit, grade: e.target.value })} placeholder="e.g. 4th" />
+            <Field label="Age" value={edit.age || ''} onChange={(e) => setEdit({ ...edit, age: e.target.value })} placeholder="e.g. 8" />
             <Field label="Level" value={edit.level} options={LEVELS} onChange={(e) => setEdit({ ...edit, level: e.target.value })} />
           </div>
           <Field label="Status" value={edit.season_status || 'active'} options={[{ value: 'active', label: 'Active' }, { value: 'inactive', label: 'Inactive' }]} onChange={(e) => setEdit({ ...edit, season_status: e.target.value })} />
