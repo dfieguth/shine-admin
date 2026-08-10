@@ -415,29 +415,80 @@ function Classes({ onOpenRoster }) {
 const BLANK_FAMILY = { parent_first_name: '', parent_last_name: '', email: '', phone: '', emergency_contact_name: '', emergency_contact_phone: '', notes: '' }
 function Families() {
   const [rows, setRows] = useState(null)
+  const [studentCounts, setStudentCounts] = useState({}) // family_id -> [student names]
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [q, setQ] = useState('')
+  const [statusFilter, setStatusFilter] = useState('active') // active | archived | all
+  const [showDupes, setShowDupes] = useState(false)
+  const [merging, setMerging] = useState(null) // { groupKey, survivorId }
+  const [mergeBusy, setMergeBusy] = useState(false)
   const sort = useSort('parent')
+
   const load = useCallback(async () => {
-    const { data } = await supabase.from('families').select('*').order('parent_last_name')
-    setRows(data || [])
+    const [{ data: fams }, { data: studs }] = await Promise.all([
+      supabase.from('families').select('*').order('parent_last_name'),
+      supabase.from('students').select('id, first_name, last_name, family_id'),
+    ])
+    setRows(fams || [])
+    const map = {}
+    for (const s of studs || []) {
+      if (!s.family_id) continue
+      ;(map[s.family_id] = map[s.family_id] || []).push(`${s.first_name} ${s.last_name}`)
+    }
+    setStudentCounts(map)
   }, [])
   useEffect(() => { load() }, [load])
+
   async function save() {
     setSaving(true)
     if (edit.id) await supabase.from('families').update(edit).eq('id', edit.id)
     else await supabase.from('families').insert(edit)
     setSaving(false); setEdit(null); load()
   }
+  async function toggleArchived(f) {
+    await supabase.from('families').update({ archived: !f.archived }).eq('id', f.id)
+    load()
+  }
+
+  // Possible-duplicate detection: same normalized parent name appearing on
+  // more than one non-archived family record. Client-side, same logic as
+  // the SQL diagnostic from before — just built into the screen now.
+  const dupeGroups = (() => {
+    if (!rows) return []
+    const groups = {}
+    for (const f of rows.filter((f) => !f.archived)) {
+      const key = `${(f.parent_first_name || '').trim().toLowerCase()} ${(f.parent_last_name || '').trim().toLowerCase()}`
+      if (!key.trim()) continue
+      ;(groups[key] = groups[key] || []).push(f)
+    }
+    return Object.values(groups).filter((g) => g.length > 1)
+  })()
+
+  async function runMerge(group, survivorId) {
+    setMergeBusy(true)
+    const others = group.filter((f) => f.id !== survivorId)
+    for (const loser of others) {
+      // Move every student off the record being retired onto the survivor —
+      // this is what preserves their enrollment/attendance history instead
+      // of losing it, which is the whole reason this isn't just a delete.
+      await supabase.from('students').update({ family_id: survivorId }).eq('family_id', loser.id)
+      await supabase.from('families').update({ archived: true }).eq('id', loser.id)
+    }
+    setMergeBusy(false); setMerging(null); load()
+  }
+
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = applySort(
-    rows.filter((f) => `${f.parent_first_name} ${f.parent_last_name} ${f.email}`.toLowerCase().includes(q.toLowerCase())),
+    rows
+      .filter((f) => statusFilter === 'all' ? true : statusFilter === 'archived' ? f.archived : !f.archived)
+      .filter((f) => `${f.parent_first_name} ${f.parent_last_name} ${f.email}`.toLowerCase().includes(q.toLowerCase())),
     sort,
     {
       parent: (f) => `${f.parent_last_name} ${f.parent_first_name}`.toLowerCase(),
       contact: (f) => (f.email || f.phone || '').toLowerCase(),
       emergency: (f) => (f.emergency_contact_name || '').toLowerCase(),
+      created: (f) => f.created_at || '',
     }
   )
   return (
@@ -446,19 +497,76 @@ function Families() {
         <div><h1>Families</h1><p>Parent contacts and emergency info.</p></div>
         <button className="btn" onClick={() => setEdit({ ...BLANK_FAMILY })}>Add family</button>
       </div>
-      <div className="toolbar"><input placeholder="Search families…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+
+      {dupeGroups.length > 0 && (
+        <div className="card" style={{ marginBottom: 18, borderColor: '#e8cf9f', background: '#fdf9f0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+            <div>
+              <strong style={{ fontSize: 14.5 }}>{dupeGroups.length} possible duplicate famil{dupeGroups.length > 1 ? 'ies' : 'y'} found</strong>
+              <span style={{ color: 'var(--ink-soft)', fontSize: 13, marginLeft: 6 }}>— same parent name appears more than once</span>
+            </div>
+            <button className="btn ghost small" onClick={() => setShowDupes((s) => !s)}>{showDupes ? 'Hide' : 'Review'}</button>
+          </div>
+          {showDupes && (
+            <div style={{ marginTop: 16 }}>
+              {dupeGroups.map((group, gi) => (
+                <div key={gi} className="card" style={{ marginBottom: 12, background: '#fff' }}>
+                  <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>
+                    Pick which record to KEEP. Every student on the others gets moved onto the one you pick, then the others are archived (hidden, not deleted — reversible from the Archived filter).
+                  </p>
+                  {group.slice().sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).map((f) => (
+                    <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 8 }}>
+                      <div style={{ fontSize: 13.5 }}>
+                        <strong>{f.parent_first_name} {f.parent_last_name}</strong>
+                        <span style={{ color: 'var(--ink-soft)' }}> · {f.email || 'no email'} · {f.phone || 'no phone'}</span>
+                        <br />
+                        <span style={{ color: 'var(--ink-soft)', fontSize: 12.5 }}>
+                          Created {f.created_at ? new Date(f.created_at).toLocaleDateString() : 'unknown'} ·{' '}
+                          {(studentCounts[f.id] || []).length} student{(studentCounts[f.id] || []).length === 1 ? '' : 's'}
+                          {(studentCounts[f.id] || []).length > 0 && `: ${studentCounts[f.id].join(', ')}`}
+                        </span>
+                      </div>
+                      <button
+                        className="btn small"
+                        disabled={mergeBusy}
+                        onClick={() => setMerging({ group, survivorId: f.id, survivorLabel: `${f.parent_first_name} ${f.parent_last_name}` })}
+                      >
+                        Keep this one
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="toolbar">
+        <input placeholder="Search families…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="active">Active only</option>
+          <option value="archived">Archived only</option>
+          <option value="all">All families</option>
+        </select>
+      </div>
       {filtered.length === 0 ? (
-        <div className="card"><div className="empty"><h3>No families found</h3><p>Add a family, or adjust your search.</p></div></div>
+        <div className="card"><div className="empty"><h3>No families found</h3><p>Add a family, or adjust your search/filter.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><SortTh label="Parent" sortKey="parent" sort={sort} /><SortTh label="Contact" sortKey="contact" sort={sort} /><SortTh label="Emergency" sortKey="emergency" sort={sort} /><th></th></tr></thead>
+          <thead><tr><SortTh label="Parent" sortKey="parent" sort={sort} /><SortTh label="Contact" sortKey="contact" sort={sort} /><SortTh label="Emergency" sortKey="emergency" sort={sort} /><th>Students</th><SortTh label="Created" sortKey="created" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((f) => (
-              <tr key={f.id}>
-                <td data-label="Parent"><strong>{f.parent_first_name} {f.parent_last_name}</strong></td>
+              <tr key={f.id} style={f.archived ? { opacity: 0.55 } : undefined}>
+                <td data-label="Parent"><strong>{f.parent_first_name} {f.parent_last_name}</strong>{f.archived && <span className="pill waitlist" style={{ marginLeft: 6 }}>Archived</span>}</td>
                 <td data-label="Contact">{f.email || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{f.phone}</span></td>
                 <td data-label="Emergency">{f.emergency_contact_name || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{f.emergency_contact_phone}</span></td>
-                <td><div className="row-actions"><button className="btn ghost small" onClick={() => setEdit(f)}>Edit</button></div></td>
+                <td data-label="Students">{(studentCounts[f.id] || []).length || '—'}</td>
+                <td data-label="Created">{f.created_at ? new Date(f.created_at).toLocaleDateString() : '—'}</td>
+                <td><div className="row-actions">
+                  <button className="btn ghost small" onClick={() => setEdit(f)}>Edit</button>
+                  <button className="btn ghost small" onClick={() => toggleArchived(f)}>{f.archived ? 'Unarchive' : 'Archive'}</button>
+                </div></td>
               </tr>
             ))}
           </tbody>
@@ -479,6 +587,25 @@ function Families() {
             <Field label="Emergency phone" value={edit.emergency_contact_phone} onChange={(e) => setEdit({ ...edit, emergency_contact_phone: e.target.value })} />
           </div>
           <Field label="Notes" textarea value={edit.notes || ''} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} />
+        </Modal>
+      )}
+      {merging && (
+        <Modal
+          title="Merge these families?"
+          onClose={() => setMerging(null)}
+          onSave={() => runMerge(merging.group, merging.survivorId)}
+          saving={mergeBusy}
+          saveLabel={mergeBusy ? 'Merging…' : `Keep "${merging.survivorLabel}"`}
+        >
+          <p style={{ fontSize: 14.5 }}>
+            Every student currently on the other record{merging.group.length > 2 ? 's' : ''} will be moved onto{' '}
+            <strong>{merging.survivorLabel}</strong>. The other record{merging.group.length > 2 ? 's' : ''} will be archived
+            (hidden, not deleted) — you can undo this from the Archived filter if it turns out to be wrong.
+          </p>
+          <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
+            This does NOT copy contact info between records — {merging.survivorLabel}'s own email/phone/emergency contact stay
+            exactly as they are. Edit them by hand afterward if the other record actually had the more current info.
+          </p>
         </Modal>
       )}
     </>
