@@ -478,6 +478,26 @@ function Families() {
     setMergeBusy(false); setMerging(null); load()
   }
 
+  // Bulk shortcut: run every group's merge at once, always keeping whichever
+  // record in that group has the most recent created_at. This is exactly
+  // "keep today's registration" in practice, since a fresh registration is
+  // always the newest record — but it's phrased as "newest," not "today,"
+  // so it stays correct even if this gets run on a different day.
+  const [bulkPreview, setBulkPreview] = useState(false)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  async function runBulkMergeAll() {
+    setBulkBusy(true)
+    for (const group of dupeGroups) {
+      const survivor = group.slice().sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0]
+      const others = group.filter((f) => f.id !== survivor.id)
+      for (const loser of others) {
+        await supabase.from('students').update({ family_id: survivor.id }).eq('family_id', loser.id)
+        await supabase.from('families').update({ archived: true }).eq('id', loser.id)
+      }
+    }
+    setBulkBusy(false); setBulkPreview(false); load()
+  }
+
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = applySort(
     rows
@@ -506,6 +526,7 @@ function Families() {
               <span style={{ color: 'var(--ink-soft)', fontSize: 13, marginLeft: 6 }}>— same parent name appears more than once</span>
             </div>
             <button className="btn ghost small" onClick={() => setShowDupes((s) => !s)}>{showDupes ? 'Hide' : 'Review'}</button>
+            <button className="btn small" onClick={() => setBulkPreview(true)}>Keep newest in every group</button>
           </div>
           {showDupes && (
             <div style={{ marginTop: 16 }}>
@@ -605,6 +626,42 @@ function Families() {
           <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
             This does NOT copy contact info between records — {merging.survivorLabel}'s own email/phone/emergency contact stay
             exactly as they are. Edit them by hand afterward if the other record actually had the more current info.
+          </p>
+        </Modal>
+      )}
+      {bulkPreview && (
+        <Modal
+          title={`Merge all ${dupeGroups.length} duplicate group${dupeGroups.length > 1 ? 's' : ''}?`}
+          onClose={() => setBulkPreview(false)}
+          onSave={runBulkMergeAll}
+          saving={bulkBusy}
+          saveLabel={bulkBusy ? 'Merging…' : `Merge all ${dupeGroups.length}`}
+        >
+          <p style={{ fontSize: 14.5, marginBottom: 12 }}>
+            In every group below, the record with the most recent "Created" date is kept — everyone else's students move onto
+            it, and the older record(s) get archived. Review the list before confirming:
+          </p>
+          <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+            {dupeGroups.map((group, gi) => {
+              const sorted = group.slice().sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+              const survivor = sorted[0]
+              const losers = sorted.slice(1)
+              return (
+                <div key={gi} style={{ padding: '10px 12px', borderBottom: gi < dupeGroups.length - 1 ? '1px solid var(--line)' : 'none', fontSize: 13 }}>
+                  <span style={{ color: '#2f7d5b', fontWeight: 600 }}>KEEP</span> {survivor.parent_first_name} {survivor.parent_last_name}
+                  {' '}({survivor.created_at ? new Date(survivor.created_at).toLocaleDateString() : 'unknown'})
+                  <br />
+                  <span style={{ color: 'var(--ink-soft)' }}>
+                    archives {losers.length} older record{losers.length > 1 ? 's' : ''} from{' '}
+                    {[...new Set(losers.map((l) => l.created_at ? new Date(l.created_at).toLocaleDateString() : 'unknown'))].join(', ')}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+          <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginTop: 12 }}>
+            As before, this doesn't copy contact info — it only moves students and archives the older records. Everything here
+            is reversible from the Archived filter afterward.
           </p>
         </Modal>
       )}
