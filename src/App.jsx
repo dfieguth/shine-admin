@@ -412,7 +412,13 @@ function Classes({ onOpenRoster }) {
   )
 }
 
-const BLANK_FAMILY = { parent_first_name: '', parent_last_name: '', email: '', phone: '', emergency_contact_name: '', emergency_contact_phone: '', notes: '' }
+const BLANK_FAMILY = {
+  parent_first_name: '', parent_last_name: '', email: '', phone: '',
+  secondary_parent_name: '', secondary_parent_email: '', secondary_parent_phone: '',
+  tertiary_parent_name: '', tertiary_parent_email: '', tertiary_parent_phone: '',
+  emergency_contact_name: '', emergency_contact_relationship: '', emergency_contact_phone: '',
+  notes: '',
+}
 function Families() {
   const [rows, setRows] = useState(null)
   const [studentCounts, setStudentCounts] = useState({}) // family_id -> [student names]
@@ -580,8 +586,16 @@ function Families() {
             {filtered.map((f) => (
               <tr key={f.id} style={f.archived ? { opacity: 0.55 } : undefined}>
                 <td data-label="Parent"><strong>{f.parent_first_name} {f.parent_last_name}</strong>{f.archived && <span className="pill waitlist" style={{ marginLeft: 6 }}>Archived</span>}</td>
-                <td data-label="Contact">{f.email || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{f.phone}</span></td>
-                <td data-label="Emergency">{f.emergency_contact_name || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{f.emergency_contact_phone}</span></td>
+                <td data-label="Contact">
+                  {f.email || '—'}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{f.phone}</span>
+                  {(f.secondary_parent_name || f.tertiary_parent_name) && (
+                    <div style={{ marginTop: 3 }}>
+                      {f.secondary_parent_name && <span className="pill enrolled" style={{ marginRight: 4 }}>+2nd parent</span>}
+                      {f.tertiary_parent_name && <span className="pill enrolled">+3rd contact</span>}
+                    </div>
+                  )}
+                </td>
+                <td data-label="Emergency">{f.emergency_contact_name || '—'}{f.emergency_contact_relationship && ` (${f.emergency_contact_relationship})`}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{f.emergency_contact_phone}</span></td>
                 <td data-label="Students">{(studentCounts[f.id] || []).length || '—'}</td>
                 <td data-label="Created">{f.created_at ? new Date(f.created_at).toLocaleDateString() : '—'}</td>
                 <td><div className="row-actions">
@@ -603,11 +617,29 @@ function Families() {
             <Field label="Email" value={edit.email} onChange={(e) => setEdit({ ...edit, email: e.target.value })} />
             <Field label="Phone" value={edit.phone} onChange={(e) => setEdit({ ...edit, phone: e.target.value })} />
           </div>
+
+          <p className="form-section-label" style={{ marginTop: 18 }}>2nd Parent (optional)</p>
+          <Field label="2nd parent name" value={edit.secondary_parent_name || ''} onChange={(e) => setEdit({ ...edit, secondary_parent_name: e.target.value })} />
+          <div className="field row2">
+            <Field label="2nd parent email" value={edit.secondary_parent_email || ''} onChange={(e) => setEdit({ ...edit, secondary_parent_email: e.target.value })} />
+            <Field label="2nd parent phone number" value={edit.secondary_parent_phone || ''} onChange={(e) => setEdit({ ...edit, secondary_parent_phone: e.target.value })} />
+          </div>
+
+          <p className="form-section-label" style={{ marginTop: 18 }}>Additional Family Member / Guardian (optional)</p>
+          <Field label="Name" value={edit.tertiary_parent_name || ''} onChange={(e) => setEdit({ ...edit, tertiary_parent_name: e.target.value })} />
+          <div className="field row2">
+            <Field label="Email" value={edit.tertiary_parent_email || ''} onChange={(e) => setEdit({ ...edit, tertiary_parent_email: e.target.value })} />
+            <Field label="Phone number" value={edit.tertiary_parent_phone || ''} onChange={(e) => setEdit({ ...edit, tertiary_parent_phone: e.target.value })} />
+          </div>
+
+          <p className="form-section-label" style={{ marginTop: 18 }}>Emergency Contact</p>
           <div className="field row2">
             <Field label="Emergency contact" value={edit.emergency_contact_name} onChange={(e) => setEdit({ ...edit, emergency_contact_name: e.target.value })} />
-            <Field label="Emergency phone" value={edit.emergency_contact_phone} onChange={(e) => setEdit({ ...edit, emergency_contact_phone: e.target.value })} />
+            <Field label="Relationship" value={edit.emergency_contact_relationship || ''} onChange={(e) => setEdit({ ...edit, emergency_contact_relationship: e.target.value })} placeholder="e.g. Grandparent, neighbor" />
           </div>
-          <Field label="Notes" textarea value={edit.notes || ''} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} />
+          <Field label="Emergency phone" value={edit.emergency_contact_phone} onChange={(e) => setEdit({ ...edit, emergency_contact_phone: e.target.value })} />
+
+          <Field label="Notes" textarea value={edit.notes || ''} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} style={{ marginTop: 18 }} />
         </Modal>
       )}
       {merging && (
@@ -1038,7 +1070,15 @@ function Students() {
                   {viewing.families.secondary_parent_name && (
                     <>
                       <div className="vp-row"><span>2nd parent</span><span>{viewing.families.secondary_parent_name}</span></div>
-                      <div className="vp-row"><span>2nd parent contact</span><span>{viewing.families.secondary_parent_email} {viewing.families.secondary_parent_phone}</span></div>
+                      <div className="vp-row"><span>2nd parent email</span><span>{viewing.families.secondary_parent_email || '—'}</span></div>
+                      <div className="vp-row"><span>2nd parent phone number</span><span>{viewing.families.secondary_parent_phone || '—'}</span></div>
+                    </>
+                  )}
+                  {viewing.families.tertiary_parent_name && (
+                    <>
+                      <div className="vp-row"><span>Additional contact</span><span>{viewing.families.tertiary_parent_name}</span></div>
+                      <div className="vp-row"><span>Additional contact email</span><span>{viewing.families.tertiary_parent_email || '—'}</span></div>
+                      <div className="vp-row"><span>Additional contact phone</span><span>{viewing.families.tertiary_parent_phone || '—'}</span></div>
                     </>
                   )}
                   <div className="vp-row"><span>Emergency contact</span><span>{viewing.families.emergency_contact_name || '—'} {viewing.families.emergency_contact_relationship && `(${viewing.families.emergency_contact_relationship})`}</span></div>
