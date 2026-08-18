@@ -36,18 +36,18 @@ The internal tool for managing classes, students, families, and enrollments. Rep
 
 Open the local URL it prints. Sign in with the staff login you created.
 
-## Deploying to Vercel
+## Deploying to Netlify
 - Push this folder to a GitHub repo.
-- In Vercel, "Add New Project," import that repo.
-- Under **Environment Variables**, add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY with the same values from your .env.
-- Deploy. Done.
+- In Netlify, "Add new site" -> "Import an existing project," import that repo.
+- Under **Site configuration -> Environment variables**, add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY with the same values from your .env, plus GMAIL_ADDRESS and GMAIL_APP_PASSWORD for the send-broadcast email function.
+- Deploy. Vite only bakes environment variables in at build time, so if you add or change one later, trigger a fresh deploy for it to take effect.
 
 ## Handoff to a new owner
 
 Because schema.sql holds the whole database structure, moving this to someone else's accounts is quick:
 1. They create their own Supabase project and run schema.sql in its SQL Editor.
 2. Export data from the old project and import to the new one (Supabase's table export, or a pg_dump).
-3. They point their .env (and Vercel env vars) at their new project's URL and key.
+3. They point their .env (and Netlify env vars) at their new project's URL and key.
 4. Transfer or re-clone the GitHub repo to their account and redeploy.
 
 No data lives only in the app. The database is the source of truth, and schema.sql rebuilds it anywhere.
