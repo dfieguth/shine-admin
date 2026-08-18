@@ -198,5 +198,5 @@ textarea { resize: vertical; min-height: 60px; }
    public registration form. */
 .class-check-list{max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:9px;padding:6px 4px;background:#fff}
 .class-check-row{display:flex;gap:10px;align-items:flex-start;padding:9px;font-size:14px;cursor:pointer;border-radius:6px}
-.class-check-row:hover{background:var(--cream)}
+.class-check-row:hover{background:var(--sand)}
 .class-check-row input{width:auto;flex-shrink:0;margin-top:3px}

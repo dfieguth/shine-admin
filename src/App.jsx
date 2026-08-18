@@ -234,7 +234,11 @@ function Classes({ onOpenRoster }) {
     if (error) { setClsErr(error.message || 'Could not save. Make sure the database is up to date (run the latest SQL).'); return }
     setEdit(null); load()
   }
-  async function toggleActive(c) { await supabase.from('classes').update({ active: !c.active }).eq('id', c.id); load() }
+  async function toggleActive(c) {
+    const { error } = await supabase.from('classes').update({ active: !c.active }).eq('id', c.id)
+    if (error) { console.error('Classes: toggleActive failed —', error); alert(`Could not update: ${error.message}`); return }
+    load()
+  }
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [deleting, setDeleting] = useState(false)
   async function openDeleteConfirm(c) {
@@ -251,8 +255,10 @@ function Classes({ onOpenRoster }) {
   }
   async function doDelete() {
     setDeleting(true)
-    await supabase.from('classes').delete().eq('id', confirmDelete.id)
-    setDeleting(false); setConfirmDelete(null); setEdit(null); load()
+    const { error } = await supabase.from('classes').delete().eq('id', confirmDelete.id)
+    setDeleting(false)
+    if (error) { console.error('Classes: delete failed —', error); alert(`Could not delete: ${error.message}`); return }
+    setConfirmDelete(null); setEdit(null); load()
   }
   if (!rows) return <div className="loading">Loading…</div>
   const allSeasons = [...new Set(rows.map((c) => c.season || 'unlabeled'))]
@@ -424,6 +430,7 @@ function Families() {
   const [studentCounts, setStudentCounts] = useState({}) // family_id -> [student names]
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const [q, setQ] = useState('')
   const [statusFilter, setStatusFilter] = useState('active') // active | archived | all
   const [showDupes, setShowDupes] = useState(false)
@@ -447,13 +454,17 @@ function Families() {
   useEffect(() => { load() }, [load])
 
   async function save() {
-    setSaving(true)
-    if (edit.id) await supabase.from('families').update(edit).eq('id', edit.id)
-    else await supabase.from('families').insert(edit)
-    setSaving(false); setEdit(null); load()
+    setSaving(true); setSaveErr('')
+    const { error } = edit.id
+      ? await supabase.from('families').update(edit).eq('id', edit.id)
+      : await supabase.from('families').insert(edit)
+    setSaving(false)
+    if (error) { console.error('Families: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
   async function toggleArchived(f) {
-    await supabase.from('families').update({ archived: !f.archived }).eq('id', f.id)
+    const { error } = await supabase.from('families').update({ archived: !f.archived }).eq('id', f.id)
+    if (error) { console.error('Families: toggleArchived failed —', error); alert(`Could not update: ${error.message}`); return }
     load()
   }
 
@@ -471,17 +482,42 @@ function Families() {
     return Object.values(groups).filter((g) => g.length > 1)
   })()
 
+  const [mergeErr, setMergeErr] = useState('')
   async function runMerge(group, survivorId) {
-    setMergeBusy(true)
+    setMergeBusy(true); setMergeErr('')
     const others = group.filter((f) => f.id !== survivorId)
+    const failed = []
     for (const loser of others) {
       // Move every student off the record being retired onto the survivor —
       // this is what preserves their enrollment/attendance history instead
       // of losing it, which is the whole reason this isn't just a delete.
-      await supabase.from('students').update({ family_id: survivorId }).eq('family_id', loser.id)
-      await supabase.from('families').update({ archived: true }).eq('id', loser.id)
+      //
+      // THE FIX: the archive step used to run unconditionally, even if the
+      // student re-pointing failed. That's a real data-integrity risk this
+      // feature was specifically built to avoid — a failed re-point
+      // followed by an unconditional archive would leave a student
+      // attached to a family_id that just got hidden, with no obvious way
+      // to find them again. Archiving now only happens if the re-point for
+      // that record actually succeeded.
+      const { error: repointErr } = await supabase.from('students').update({ family_id: survivorId }).eq('family_id', loser.id)
+      if (repointErr) {
+        console.error('Families merge: re-pointing students failed for', loser.id, repointErr)
+        failed.push(`${loser.parent_first_name} ${loser.parent_last_name}`)
+        continue // do NOT archive this one — its students may not have moved
+      }
+      const { error: archiveErr } = await supabase.from('families').update({ archived: true }).eq('id', loser.id)
+      if (archiveErr) {
+        console.error('Families merge: archiving failed for', loser.id, archiveErr)
+        failed.push(`${loser.parent_first_name} ${loser.parent_last_name}`)
+      }
     }
-    setMergeBusy(false); setMerging(null); load()
+    setMergeBusy(false)
+    if (failed.length) {
+      setMergeErr(`Students were moved, but couldn't fully complete for: ${failed.join(', ')}. Nothing was lost — just re-check these records and try again.`)
+      load()
+      return
+    }
+    setMerging(null); load()
   }
 
   // Bulk shortcut: run every group's merge at once, always keeping whichever
@@ -493,15 +529,27 @@ function Families() {
   const [bulkBusy, setBulkBusy] = useState(false)
   async function runBulkMergeAll() {
     setBulkBusy(true)
+    const failed = []
     for (const group of dupeGroups) {
       const survivor = group.slice().sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0]
       const others = group.filter((f) => f.id !== survivor.id)
       for (const loser of others) {
-        await supabase.from('students').update({ family_id: survivor.id }).eq('family_id', loser.id)
-        await supabase.from('families').update({ archived: true }).eq('id', loser.id)
+        const { error: repointErr } = await supabase.from('students').update({ family_id: survivor.id }).eq('family_id', loser.id)
+        if (repointErr) {
+          console.error('Families bulk merge: re-pointing students failed for', loser.id, repointErr)
+          failed.push(`${loser.parent_first_name} ${loser.parent_last_name}`)
+          continue // do NOT archive — same reasoning as the single-merge fix above
+        }
+        const { error: archiveErr } = await supabase.from('families').update({ archived: true }).eq('id', loser.id)
+        if (archiveErr) {
+          console.error('Families bulk merge: archiving failed for', loser.id, archiveErr)
+          failed.push(`${loser.parent_first_name} ${loser.parent_last_name}`)
+        }
       }
     }
-    setBulkBusy(false); setBulkPreview(false); load()
+    setBulkBusy(false); setBulkPreview(false)
+    if (failed.length) alert(`Most merges completed, but these need a second look: ${failed.join(', ')}`)
+    load()
   }
 
   if (!rows) return <div className="loading">Loading…</div>
@@ -608,7 +656,8 @@ function Families() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit family' : 'Add family'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit family' : 'Add family'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <div className="field row2">
             <Field label="Parent first name" value={edit.parent_first_name} onChange={(e) => setEdit({ ...edit, parent_first_name: e.target.value })} />
             <Field label="Parent last name" value={edit.parent_last_name} onChange={(e) => setEdit({ ...edit, parent_last_name: e.target.value })} />
@@ -645,11 +694,12 @@ function Families() {
       {merging && (
         <Modal
           title="Merge these families?"
-          onClose={() => setMerging(null)}
+          onClose={() => { setMerging(null); setMergeErr('') }}
           onSave={() => runMerge(merging.group, merging.survivorId)}
           saving={mergeBusy}
           saveLabel={mergeBusy ? 'Merging…' : `Keep "${merging.survivorLabel}"`}
         >
+          {mergeErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{mergeErr}</div>}
           <p style={{ fontSize: 14.5 }}>
             Every student currently on the other record{merging.group.length > 2 ? 's' : ''} will be moved onto{' '}
             <strong>{merging.survivorLabel}</strong>. The other record{merging.group.length > 2 ? 's' : ''} will be archived
@@ -762,8 +812,10 @@ function Students() {
   }
   async function doDelete() {
     setDeleting(true)
-    await supabase.from('students').delete().eq('id', confirmDelete.id)
-    setDeleting(false); setConfirmDelete(null); setEdit(null); load()
+    const { error } = await supabase.from('students').delete().eq('id', confirmDelete.id)
+    setDeleting(false)
+    if (error) { console.error('Students: delete failed —', error); alert(`Could not delete: ${error.message}`); return }
+    setConfirmDelete(null); setEdit(null); load()
   }
   function toggleSelect(id) {
     setSelectedIds((prev) => {
@@ -786,8 +838,10 @@ function Students() {
   async function bulkSetStatus(status) {
     if (!selectedIds.size) return
     setBulkBusy(true)
-    await supabase.from('students').update({ season_status: status }).in('id', [...selectedIds])
-    setBulkBusy(false); setSelectedIds(new Set()); load()
+    const { error } = await supabase.from('students').update({ season_status: status }).in('id', [...selectedIds])
+    setBulkBusy(false)
+    if (error) { console.error('Students: bulkSetStatus failed —', error); alert(`Could not update: ${error.message}`); return }
+    setSelectedIds(new Set()); load()
   }
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(null)
   const [bulkDeleting, setBulkDeleting] = useState(false)
@@ -808,16 +862,26 @@ function Students() {
   }
   async function doBulkDelete() {
     setBulkDeleting(true)
-    await supabase.from('students').delete().in('id', [...selectedIds])
-    setBulkDeleting(false); setBulkDeleteConfirm(null); setSelectedIds(new Set()); load()
+    const { error } = await supabase.from('students').delete().in('id', [...selectedIds])
+    setBulkDeleting(false)
+    if (error) { console.error('Students: bulk delete failed —', error); alert(`Could not delete: ${error.message}`); return }
+    setBulkDeleteConfirm(null); setSelectedIds(new Set()); load()
   }
   async function uploadPhoto(s, e) {
     const file = e.target.files?.[0]; if (!file) return
     setBusyPhoto(s.id)
     const path = `students/${s.id}-${Date.now()}.jpg`
-    await supabase.storage.from('student-photos').upload(path, file, { upsert: true, contentType: file.type })
-    await supabase.from('students').update({ photo_path: path }).eq('id', s.id)
-    setBusyPhoto(''); load()
+    const { error: uploadErr } = await supabase.storage.from('student-photos').upload(path, file, { upsert: true, contentType: file.type })
+    if (uploadErr) {
+      console.error('Students: photo upload failed —', uploadErr)
+      setBusyPhoto('')
+      alert(`Could not upload photo: ${uploadErr.message}`)
+      return
+    }
+    const { error: updateErr } = await supabase.from('students').update({ photo_path: path }).eq('id', s.id)
+    setBusyPhoto('')
+    if (updateErr) { console.error('Students: saving photo_path failed —', updateErr); alert(`Photo uploaded but could not save: ${updateErr.message}`); return }
+    load()
   }
   // Pulls the SAME active classes shown on the Classes page — nothing
   // separate to keep in sync. Also loads this student's CURRENT
@@ -843,26 +907,34 @@ function Students() {
     if (!pickedClassIds.length) { setEnrollNote('Pick at least one class.'); return }
     setEnrollBusy(true)
     let waitlistedCount = 0
+    let errorCount = 0
     for (const classId of pickedClassIds) {
       const cls = availableClasses.find((c) => c.id === classId)
       const status = await enrollStudentInClass(enrolling.id, classId, cls?.capacity)
       if (status === 'waitlist') waitlistedCount++
+      if (status === 'error') errorCount++
     }
     setEnrollBusy(false); setPickedClassIds([])
-    setEnrollNote(waitlistedCount ? `Enrolled — ${waitlistedCount} class${waitlistedCount > 1 ? 'es' : ''} full, added to waitlist instead.` : 'Enrolled ✓')
+    setEnrollNote(
+      errorCount ? `${errorCount} class${errorCount > 1 ? 'es' : ''} could NOT be saved — check the console and try again.`
+      : waitlistedCount ? `Enrolled — ${waitlistedCount} class${waitlistedCount > 1 ? 'es' : ''} full, added to waitlist instead.`
+      : 'Enrolled ✓'
+    )
     await refreshEnrollModal(enrolling)
-    setTimeout(() => setEnrollNote(''), 2500)
+    setTimeout(() => setEnrollNote(''), errorCount ? 6000 : 2500)
     load()
   }
   // Drop = keep the history (attendance stays attached), just marks them
   // no longer active in that class. Remove = permanently delete the
   // enrollment row. Same distinction the Enrollments screen already uses.
   async function unenrollDrop(enr) {
-    await supabase.from('enrollments').update({ status: 'dropped' }).eq('id', enr.id)
+    const { error } = await supabase.from('enrollments').update({ status: 'dropped' }).eq('id', enr.id)
+    if (error) { console.error('Students: unenrollDrop failed —', error); alert(`Could not drop: ${error.message}`); return }
     await refreshEnrollModal(enrolling); load()
   }
   async function unenrollRemove(enr) {
-    await supabase.from('enrollments').delete().eq('id', enr.id)
+    const { error } = await supabase.from('enrollments').delete().eq('id', enr.id)
+    if (error) { console.error('Students: unenrollRemove failed —', error); alert(`Could not remove: ${error.message}`); return }
     await refreshEnrollModal(enrolling); load()
   }
   const [saveErr, setSaveErr] = useState('')
@@ -1175,12 +1247,32 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   useEffect(() => { load() }, [load])
   async function addEnrollment() {
     setSaving(true)
-    await supabase.from('enrollments').insert({ student_id: adding.student_id, class_id: adding.class_id, status: 'enrolled' })
-    await markStudentActive(adding.student_id)
-    setSaving(false); setAdding(null); load()
+    // Deliberately no capacity check here — this is the manual admin-side
+    // add, and staff should be able to enroll over capacity on purpose if
+    // they choose to (confirmed explicitly by Corrie). Only fixing the
+    // missing error handling, not the intentional lack of a capacity gate.
+    const { error: enrollErr } = await supabase.from('enrollments').insert({ student_id: adding.student_id, class_id: adding.class_id, status: 'enrolled' })
+    if (enrollErr) {
+      console.error('Enrollments: addEnrollment failed —', enrollErr)
+      setSaving(false)
+      alert(`Could not add enrollment: ${enrollErr.message}`)
+      return
+    }
+    const activated = await markStudentActive(adding.student_id)
+    setSaving(false)
+    if (!activated) { alert('Enrolled, but could not mark the student Active — check Students and update manually if needed.') }
+    setAdding(null); load()
   }
-  async function setStatus(id, status) { await supabase.from('enrollments').update({ status }).eq('id', id); load() }
-  async function remove(id) { await supabase.from('enrollments').delete().eq('id', id); load() }
+  async function setStatus(id, status) {
+    const { error } = await supabase.from('enrollments').update({ status }).eq('id', id)
+    if (error) { console.error('Enrollments: setStatus failed —', error); alert(`Could not update status: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    const { error } = await supabase.from('enrollments').delete().eq('id', id)
+    if (error) { console.error('Enrollments: remove failed —', error); alert(`Could not remove: ${error.message}`); return }
+    load()
+  }
   const [copied, setCopied] = useState('')
   async function copyEmails() {
     const { data } = await supabase.from('enrollments').select('students(families(email))').eq('class_id', filterClass).eq('status', 'enrolled')
@@ -1439,21 +1531,35 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
 // season") is created for them. Called from every place an enrollment
 // gets inserted, so nothing slips through.
 async function markStudentActive(studentId) {
-  await supabase.from('students').update({ season_status: 'active' }).eq('id', studentId)
+  const { error } = await supabase.from('students').update({ season_status: 'active' }).eq('id', studentId)
+  if (error) console.error('markStudentActive failed for', studentId, error)
+  return !error
 }
 
 // Same capacity-aware enrolling logic used by the public registration
 // form, but by real class ID rather than fuzzy text matching — used when
 // the class is picked directly from a list (e.g. the Students screen's
-// "Enroll in class" button).
+// "Enroll in class" button). Uses class_enrollment_counts(), the same
+// security-definer RPC the public form uses, rather than a raw count
+// query — staff sessions do have SELECT on enrollments so a raw count
+// would likely work here too, but this project has repeatedly found
+// permissions documented as granted that weren't actually live, so the
+// RPC (confirmed working) is the safer default either way.
 async function enrollStudentInClass(studentId, classId, capacity) {
   let status = 'enrolled'
   if (capacity) {
-    const { count } = await supabase.from('enrollments').select('id', { count: 'exact', head: true }).eq('class_id', classId).eq('status', 'enrolled')
-    if ((count ?? 0) >= capacity) status = 'waitlist'
+    const { data: counts, error: countErr } = await supabase.rpc('class_enrollment_counts')
+    if (countErr) console.error('enrollStudentInClass: capacity check failed, proceeding as enrolled —', countErr)
+    const count = (counts || []).find((r) => r.class_id === classId)?.enrolled || 0
+    if (count >= capacity) status = 'waitlist'
   }
-  await supabase.from('enrollments').insert({ student_id: studentId, class_id: classId, status })
-  await markStudentActive(studentId)
+  const { error: enrollErr } = await supabase.from('enrollments').insert({ student_id: studentId, class_id: classId, status })
+  if (enrollErr) {
+    console.error('enrollStudentInClass: enrollment insert failed —', enrollErr)
+    return 'error'
+  }
+  const activated = await markStudentActive(studentId)
+  if (!activated) return 'error'
   return status
 }
 
@@ -1492,8 +1598,15 @@ function SiteContent() {
   async function saveAll() {
     setSaving(true); setSavedNote('')
     const rows = SITE_CONTENT_FIELDS.map((f) => ({ key: f.key, value: values[f.key] ?? '', updated_at: new Date().toISOString() }))
-    await supabase.from('site_content').upsert(rows, { onConflict: 'key' })
-    setSaving(false); setSavedNote('Saved ✓'); setTimeout(() => setSavedNote(''), 2500)
+    const { error } = await supabase.from('site_content').upsert(rows, { onConflict: 'key' })
+    setSaving(false)
+    if (error) {
+      console.error('SiteContent: save failed —', error)
+      setSavedNote(`Could not save: ${error.message}`)
+      return
+    }
+    setSavedNote('Saved ✓')
+    setTimeout(() => setSavedNote((n) => n === 'Saved ✓' ? '' : n), 2500)
   }
   if (!values) return <div className="loading">Loading…</div>
   const grouped = SITE_CONTENT_FIELDS.reduce((acc, f) => {
@@ -1509,7 +1622,7 @@ function SiteContent() {
         </div>
         <button className="btn" onClick={saveAll} disabled={saving}>{saving ? 'Saving…' : 'Save all changes'}</button>
       </div>
-      {savedNote && <div style={{ color: 'var(--brass)', fontWeight: 600, marginBottom: 14 }}>{savedNote}</div>}
+      {savedNote && <div style={{ color: savedNote.startsWith('Could not') ? '#b23838' : 'var(--brass)', fontWeight: 600, marginBottom: 14 }}>{savedNote}</div>}
       {Object.entries(grouped).map(([where, fields]) => (
         <div className="card" key={where} style={{ marginBottom: 18 }}>
           <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: 15 }}>{where}</h3>
@@ -1616,9 +1729,10 @@ function Registrations() {
     if (!selectedIds.size) return
     if (!confirm(`Clear ${selectedIds.size} registration${selectedIds.size > 1 ? 's' : ''} from this log? This only removes the log entry — it does NOT touch any student, family, or enrollment record already created.`)) return
     setClearing(true)
-    await supabase.from('registrations').delete().in('id', [...selectedIds])
-    setSelectedIds(new Set())
+    const { error } = await supabase.from('registrations').delete().in('id', [...selectedIds])
     setClearing(false)
+    if (error) { console.error('Registrations: clearSelected failed —', error); alert(`Could not clear: ${error.message}`); return }
+    setSelectedIds(new Set())
     load()
   }
   if (!rows) return <div className="loading">Loading…</div>
@@ -1719,6 +1833,7 @@ function Teachers() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const sort = useSort('name')
   const load = useCallback(async () => {
     const { data } = await supabase.from('teachers').select('*').order('name')
@@ -1726,10 +1841,13 @@ function Teachers() {
   }, [])
   useEffect(() => { load() }, [load])
   async function save() {
-    setSaving(true)
-    if (edit.id) await supabase.from('teachers').update(edit).eq('id', edit.id)
-    else await supabase.from('teachers').insert(edit)
-    setSaving(false); setEdit(null); load()
+    setSaving(true); setSaveErr('')
+    const { error } = edit.id
+      ? await supabase.from('teachers').update(edit).eq('id', edit.id)
+      : await supabase.from('teachers').insert(edit)
+    setSaving(false)
+    if (error) { console.error('Teachers: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
   if (!rows) return <div className="loading">Loading…</div>
   const sortedRows = applySort(rows, sort, {
@@ -1765,7 +1883,8 @@ function Teachers() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit teacher' : 'Add teacher'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit teacher' : 'Add teacher'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <Field label="Name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
           <div className="field row2">
             <Field label="Email" value={edit.email || ''} onChange={(e) => setEdit({ ...edit, email: e.target.value })} />
@@ -1806,10 +1925,15 @@ function Attendance({ myTeacherId }) {
   }, [])
   useEffect(() => { loadPeriod() }, [loadPeriod])
   async function savePeriod() {
-    await supabase.from('site_content').upsert([
+    const { error } = await supabase.from('site_content').upsert([
       { key: 'attendance_period_start', value: period.start },
       { key: 'attendance_period_end', value: period.end },
     ], { onConflict: 'key' })
+    if (error) {
+      console.error('Attendance: savePeriod failed —', error)
+      alert(`Could not save the alert period: ${error.message}`)
+      return // leave the editor open — don't imply it saved when it didn't
+    }
     setEditingPeriod(false)
   }
 
@@ -1827,6 +1951,10 @@ function Attendance({ myTeacherId }) {
       student_id: e.students?.id,
       name: e.students ? `${e.students.first_name} ${e.students.last_name}` : '—',
       parentEmail: e.students?.families?.email || '',
+      // The query already fetched this, it just wasn't being carried
+      // through — which is why attendance alert emails to parents used to
+      // open by greeting the STUDENT by name instead of the parent.
+      parentFirstName: e.students?.families?.parent_first_name || '',
       status: existing[e.id] ?? '',
     })))
   }, [classId, date])
@@ -1844,7 +1972,12 @@ function Attendance({ myTeacherId }) {
   // on the unique constraint and no duplicate email goes out.
   async function checkAlertsForStudent(r) {
     if (!period.start || !period.end || !r.student_id) return
-    const { data: enrRows } = await supabase.from('enrollments').select('id').eq('student_id', r.student_id)
+    // Only count attendance from enrollments the student is actually still
+    // in. This used to have no status filter at all, so attendance from a
+    // class they DROPPED still counted toward their tardy/absence totals —
+    // which could fire a real alert email to a parent about a class their
+    // child is no longer enrolled in.
+    const { data: enrRows } = await supabase.from('enrollments').select('id').eq('student_id', r.student_id).eq('status', 'enrolled')
     const enrIds = (enrRows || []).map((e) => e.id)
     if (!enrIds.length) return
     const { data: attRows } = await supabase.from('attendance').select('status')
@@ -1860,12 +1993,25 @@ function Attendance({ myTeacherId }) {
     for (const [alertType, hitThreshold, word, n] of checks) {
       if (!hitThreshold) continue
       const { error: lockErr } = await supabase.from('attendance_alerts_sent').insert({ student_id: r.student_id, alert_type: alertType, period_start: period.start })
-      if (lockErr) continue // already sent this one — unique constraint blocked the duplicate
+      if (lockErr) {
+        // A duplicate-key error is the EXPECTED case — it means this exact
+        // alert already went out, and skipping is correct. But any other
+        // error (network blip, permissions) landed in this same branch and
+        // was silently swallowed, quietly dropping an alert that never
+        // actually sent. Postgres reports a unique violation as code 23505.
+        if (lockErr.code !== '23505') {
+          console.error(`Attendance alert: could not record "${alertType}" for student ${r.student_id}, skipping send to avoid a possible duplicate —`, lockErr)
+        }
+        continue
+      }
       const ord = n === 2 ? '2nd' : '3rd'
-      const parentName = r.name.split(' ')[0]
       const subject = `Attendance alert: ${r.name} — ${ord} ${word}`
+      // Greets the PARENT by name — this used to greet the student instead,
+      // since it was pulling the first word of r.name (the student's name)
+      // for a message addressed to the parent. Falls back to a neutral
+      // greeting if the family record has no parent first name on file.
       const message = [
-        `Hi ${parentName || 'there'},`, '',
+        `Hi ${r.parentFirstName || 'there'},`, '',
         `This is a note that ${r.name} has reached their ${ord} ${word} of the current period (${period.start} to ${period.end}).`,
         n === 3 ? 'Please reach out if there is anything we can help with.' : '',
         '', 'Grace and Peace,', 'Corrie / Shine Dance Studio',
@@ -1878,17 +2024,31 @@ function Attendance({ myTeacherId }) {
   async function save() {
     setSaving(true)
     const ids = roster.map((r) => r.enrollment_id)
-    await supabase.from('attendance').delete().eq('class_date', date).in('enrollment_id', ids)
+    const { error: deleteErr } = await supabase.from('attendance').delete().eq('class_date', date).in('enrollment_id', ids)
+    if (deleteErr) {
+      console.error('Attendance: clearing previous marks failed —', deleteErr)
+      setSaving(false)
+      setSavedMsg(`Could not save: ${deleteErr.message}`)
+      return
+    }
     const marked = roster.filter((r) => r.status)
     if (marked.length) {
-      await supabase.from('attendance').insert(marked.map((r) => ({
+      const { error: insertErr } = await supabase.from('attendance').insert(marked.map((r) => ({
         enrollment_id: r.enrollment_id, class_date: date, status: r.status,
         present: r.status === 'present' || r.status === 'tardy',
       })))
+      if (insertErr) {
+        console.error('Attendance: saving marks failed —', insertErr)
+        setSaving(false)
+        setSavedMsg(`Could not save: ${insertErr.message}`)
+        return
+      }
     }
-    setSaving(false); setSavedMsg('Saved ✓'); setTimeout(() => setSavedMsg(''), 2500)
+    setSaving(false); setSavedMsg('Saved ✓'); setTimeout(() => setSavedMsg((m) => m === 'Saved ✓' ? '' : m), 2500)
     // Fire-and-forget: alert checks run after save confirms, don't block the
-    // "Saved" message on email sending.
+    // "Saved" message on email sending. Only reached once the save above is
+    // confirmed to have actually succeeded — otherwise this would compute
+    // alert counts from data that was never actually written.
     for (const r of roster.filter((r) => r.status === 'tardy' || r.status === 'absent')) checkAlertsForStudent(r)
   }
 
@@ -1951,7 +2111,7 @@ function Attendance({ myTeacherId }) {
           </table></div>
           <div className="toolbar" style={{ marginTop: 16 }}>
             <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save attendance'}</button>
-            {savedMsg && <span style={{ color: 'var(--ok, #2f7d5b)', fontSize: 14, fontWeight: 500 }}>{savedMsg}</span>}
+            {savedMsg && <span style={{ color: savedMsg.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)', fontSize: 14, fontWeight: 500 }}>{savedMsg}</span>}
           </div>
         </>
       )}
@@ -1977,29 +2137,39 @@ function Photos() {
   }, [])
   useEffect(() => { load() }, [load])
 
+  const [photoErr, setPhotoErr] = useState('')
   async function uploadHero(e) {
     const file = e.target.files?.[0]; if (!file) return
-    setBusy('hero')
-    await supabase.storage.from(BUCKET).upload('hero.jpg', file, { upsert: true, contentType: file.type })
-    setBusy(''); load()
+    setBusy('hero'); setPhotoErr('')
+    const { error } = await supabase.storage.from(BUCKET).upload('hero.jpg', file, { upsert: true, contentType: file.type })
+    setBusy('')
+    if (error) { console.error('Photos: hero upload failed —', error); setPhotoErr(`Could not upload hero photo: ${error.message}`); return }
+    load()
   }
   async function uploadGallery(e) {
     const files = Array.from(e.target.files || []); if (!files.length) return
-    setBusy('gallery')
+    setBusy('gallery'); setPhotoErr('')
+    const failed = []
     for (const file of files) {
       const safe = Date.now() + '-' + file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_')
-      await supabase.storage.from(BUCKET).upload('gallery/' + safe, file, { contentType: file.type })
+      const { error } = await supabase.storage.from(BUCKET).upload('gallery/' + safe, file, { contentType: file.type })
+      if (error) { console.error('Photos: gallery upload failed for', file.name, error); failed.push(file.name) }
     }
-    setBusy(''); load()
+    setBusy('')
+    if (failed.length) setPhotoErr(`Some photos didn't upload: ${failed.join(', ')}. Try those again.`)
+    load()
   }
   async function removeGallery(name) {
-    await supabase.storage.from(BUCKET).remove(['gallery/' + name]); load()
+    const { error } = await supabase.storage.from(BUCKET).remove(['gallery/' + name])
+    if (error) { console.error('Photos: removeGallery failed —', error); alert(`Could not remove photo: ${error.message}`); return }
+    load()
   }
 
   if (gallery === null) return <div className="loading">Loading…</div>
   return (
     <>
       <div className="page-head"><div><h1>Photos</h1><p>These photos appear on the public website. Only upload photos that families have cleared for public use.</p></div></div>
+      {photoErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 16 }}>{photoErr}</div>}
 
       <div className="card card-pad" style={{ marginBottom: 20 }}>
         <h3 style={{ marginBottom: 10 }}>Hero photo (the big one at the top)</h3>
@@ -2039,20 +2209,32 @@ function Announcements() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const load = useCallback(async () => {
     const { data } = await supabase.from('announcements').select('*').order('created_at', { ascending: false })
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
   async function save() {
-    setSaving(true)
+    setSaving(true); setSaveErr('')
     const payload = { ...edit, starts_on: edit.starts_on || null, ends_on: edit.ends_on || null }
-    if (edit.id) await supabase.from('announcements').update(payload).eq('id', edit.id)
-    else await supabase.from('announcements').insert(payload)
-    setSaving(false); setEdit(null); load()
+    const { error } = edit.id
+      ? await supabase.from('announcements').update(payload).eq('id', edit.id)
+      : await supabase.from('announcements').insert(payload)
+    setSaving(false)
+    if (error) { console.error('Announcements: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
-  async function toggleActive(a) { await supabase.from('announcements').update({ active: !a.active }).eq('id', a.id); load() }
-  async function remove(id) { await supabase.from('announcements').delete().eq('id', id); load() }
+  async function toggleActive(a) {
+    const { error } = await supabase.from('announcements').update({ active: !a.active }).eq('id', a.id)
+    if (error) { console.error('Announcements: toggleActive failed —', error); alert(`Could not update: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    const { error } = await supabase.from('announcements').delete().eq('id', id)
+    if (error) { console.error('Announcements: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   return (
     <>
@@ -2082,7 +2264,8 @@ function Announcements() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit announcement' : 'Add announcement'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit announcement' : 'Add announcement'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <Field label="Title (the banner text)" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} placeholder="No classes the week of Thanksgiving" />
           <Field label="Details (optional)" textarea value={edit.message || ''} onChange={(e) => setEdit({ ...edit, message: e.target.value })} placeholder="Classes resume Monday, December 1." />
           <div className="field row2">
@@ -2100,20 +2283,32 @@ function Policies() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const load = useCallback(async () => {
     const { data } = await supabase.from('policy_sections').select('*').order('sort_order')
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
   async function save() {
-    setSaving(true)
+    setSaving(true); setSaveErr('')
     const payload = { ...edit, sort_order: Number(edit.sort_order) || 0 }
-    if (edit.id) await supabase.from('policy_sections').update(payload).eq('id', edit.id)
-    else await supabase.from('policy_sections').insert(payload)
-    setSaving(false); setEdit(null); load()
+    const { error } = edit.id
+      ? await supabase.from('policy_sections').update(payload).eq('id', edit.id)
+      : await supabase.from('policy_sections').insert(payload)
+    setSaving(false)
+    if (error) { console.error('Policies: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
-  async function toggleActive(p) { await supabase.from('policy_sections').update({ active: !p.active }).eq('id', p.id); load() }
-  async function remove(id) { await supabase.from('policy_sections').delete().eq('id', id); load() }
+  async function toggleActive(p) {
+    const { error } = await supabase.from('policy_sections').update({ active: !p.active }).eq('id', p.id)
+    if (error) { console.error('Policies: toggleActive failed —', error); alert(`Could not update: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    const { error } = await supabase.from('policy_sections').delete().eq('id', id)
+    if (error) { console.error('Policies: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   return (
     <>
@@ -2143,7 +2338,8 @@ function Policies() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit section' : 'Add section'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit section' : 'Add section'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <Field label="Section title" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} placeholder="e.g. Mandatory Parent Meetings" />
           <Field label="Body text" textarea value={edit.body} onChange={(e) => setEdit({ ...edit, body: e.target.value })} style={{ minHeight: 160 }} placeholder="Plain text — blank lines create paragraph breaks, lines starting with • become bullet points." />
           <Field label="Order (lower shows first)" type="number" value={edit.sort_order} onChange={(e) => setEdit({ ...edit, sort_order: e.target.value })} />
@@ -2158,6 +2354,7 @@ function Team() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const [busyPhoto, setBusyPhoto] = useState('')
   const load = useCallback(async () => {
     const { data } = await supabase.from('team_members').select('*').order('sort_order').order('created_at')
@@ -2166,22 +2363,36 @@ function Team() {
   useEffect(() => { load() }, [load])
   const photoUrl = (p) => p ? supabase.storage.from(BUCKET).getPublicUrl(p).data.publicUrl : null
   async function save() {
-    setSaving(true)
+    setSaving(true); setSaveErr('')
     const payload = { ...edit, sort_order: Number(edit.sort_order) || 0 }
-    if (edit.id) await supabase.from('team_members').update(payload).eq('id', edit.id)
-    else await supabase.from('team_members').insert(payload)
-    setSaving(false); setEdit(null); load()
+    const { error } = edit.id
+      ? await supabase.from('team_members').update(payload).eq('id', edit.id)
+      : await supabase.from('team_members').insert(payload)
+    setSaving(false)
+    if (error) { console.error('Team: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
   async function uploadPhoto(member, e) {
     const file = e.target.files?.[0]; if (!file) return
     setBusyPhoto(member.id)
     const path = `team/${member.id}-${Date.now()}.jpg`
-    await supabase.storage.from(BUCKET).upload(path, file, { upsert: true, contentType: file.type })
-    await supabase.from('team_members').update({ photo_path: path }).eq('id', member.id)
-    setBusyPhoto(''); load()
+    const { error: uploadErr } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: true, contentType: file.type })
+    if (uploadErr) { console.error('Team: photo upload failed —', uploadErr); setBusyPhoto(''); alert(`Could not upload photo: ${uploadErr.message}`); return }
+    const { error: updateErr } = await supabase.from('team_members').update({ photo_path: path }).eq('id', member.id)
+    setBusyPhoto('')
+    if (updateErr) { console.error('Team: saving photo_path failed —', updateErr); alert(`Photo uploaded but could not save: ${updateErr.message}`); return }
+    load()
   }
-  async function toggleActive(m) { await supabase.from('team_members').update({ active: !m.active }).eq('id', m.id); load() }
-  async function remove(id) { await supabase.from('team_members').delete().eq('id', id); load() }
+  async function toggleActive(m) {
+    const { error } = await supabase.from('team_members').update({ active: !m.active }).eq('id', m.id)
+    if (error) { console.error('Team: toggleActive failed —', error); alert(`Could not update: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    const { error } = await supabase.from('team_members').delete().eq('id', id)
+    if (error) { console.error('Team: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   return (
     <>
@@ -2222,7 +2433,8 @@ function Team() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit team member' : 'Add team member'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit team member' : 'Add team member'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <div className="field row2">
             <Field label="Name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
             <Field label="Role" value={edit.role || ''} onChange={(e) => setEdit({ ...edit, role: e.target.value })} placeholder="Studio Director" />
@@ -2240,19 +2452,31 @@ function Testimonials() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const load = useCallback(async () => {
     const { data } = await supabase.from('testimonials').select('*').order('created_at', { ascending: false })
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
   async function save() {
-    setSaving(true)
-    if (edit.id) await supabase.from('testimonials').update(edit).eq('id', edit.id)
-    else await supabase.from('testimonials').insert(edit)
-    setSaving(false); setEdit(null); load()
+    setSaving(true); setSaveErr('')
+    const { error } = edit.id
+      ? await supabase.from('testimonials').update(edit).eq('id', edit.id)
+      : await supabase.from('testimonials').insert(edit)
+    setSaving(false)
+    if (error) { console.error('Testimonials: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
-  async function toggleActive(t) { await supabase.from('testimonials').update({ active: !t.active }).eq('id', t.id); load() }
-  async function remove(id) { await supabase.from('testimonials').delete().eq('id', id); load() }
+  async function toggleActive(t) {
+    const { error } = await supabase.from('testimonials').update({ active: !t.active }).eq('id', t.id)
+    if (error) { console.error('Testimonials: toggleActive failed —', error); alert(`Could not update: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    const { error } = await supabase.from('testimonials').delete().eq('id', id)
+    if (error) { console.error('Testimonials: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   return (
     <>
@@ -2282,7 +2506,8 @@ function Testimonials() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit quote' : 'Add quote'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit quote' : 'Add quote'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <Field label="Quote (no quotation marks needed)" textarea value={edit.quote} onChange={(e) => setEdit({ ...edit, quote: e.target.value })} />
           <Field label="Attribution" value={edit.attribution || ''} onChange={(e) => setEdit({ ...edit, attribution: e.target.value })} placeholder="Maria, Ballet IA parent" />
         </Modal>
@@ -2340,19 +2565,27 @@ function Rooms() {
   const [rows, setRows] = useState(null)
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   const load = useCallback(async () => {
     const { data } = await supabase.from('rooms').select('*').order('name')
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
   async function save() {
-    setSaving(true)
+    setSaving(true); setSaveErr('')
     const payload = { ...edit, capacity: edit.capacity === '' ? null : Number(edit.capacity) }
-    if (edit.id) await supabase.from('rooms').update(payload).eq('id', edit.id)
-    else await supabase.from('rooms').insert(payload)
-    setSaving(false); setEdit(null); load()
+    const { error } = edit.id
+      ? await supabase.from('rooms').update(payload).eq('id', edit.id)
+      : await supabase.from('rooms').insert(payload)
+    setSaving(false)
+    if (error) { console.error('Rooms: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
   }
-  async function remove(id) { await supabase.from('rooms').delete().eq('id', id); load() }
+  async function remove(id) {
+    const { error } = await supabase.from('rooms').delete().eq('id', id)
+    if (error) { console.error('Rooms: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   return (
     <>
@@ -2378,7 +2611,8 @@ function Rooms() {
         </table></div>
       )}
       {edit && (
-        <Modal title={edit.id ? 'Edit room' : 'Add room'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit room' : 'Add room'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
           <Field label="Room name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="B21" />
           <Field label="Capacity (optional)" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} />
         </Modal>
@@ -2559,7 +2793,17 @@ function SeasonRollover() {
       end_time: c.end_time, location: c.location, capacity: c.capacity, instructor_name: c.instructor_name,
       min_age: c.min_age, max_age: c.max_age, active: true, season: targetSeason,
     }))
-    if (payload.length) await supabase.from('classes').insert(payload)
+    let copiedCount = 0
+    if (payload.length) {
+      const { error: copyErr } = await supabase.from('classes').insert(payload)
+      if (copyErr) {
+        console.error('SeasonRollover: copying classes failed —', copyErr)
+        setRunning(false)
+        setResult(`Could not copy classes forward: ${copyErr.message}. Nothing was retired either — fix this first and try again.`)
+        return // do NOT proceed to retiring the source season if the copy failed
+      }
+      copiedCount = payload.length
+    }
     // This is the actual fix for the leftover-active-old-season-class bug:
     // rolling forward never used to touch the SOURCE season's active flag,
     // so last season's classes silently stayed visible to parents on the
@@ -2568,17 +2812,24 @@ function SeasonRollover() {
     // whole source season here closes that gap at the point it's created,
     // instead of relying on it being caught later.
     let retiredCount = 0
+    let retireErrMsg = ''
     if (retireSource && sourceClasses.length) {
       const stillActive = sourceClasses.filter((c) => c.active)
       if (stillActive.length) {
-        await supabase.from('classes').update({ active: false }).in('id', stillActive.map((c) => c.id))
-        retiredCount = stillActive.length
+        const { error: retireErr } = await supabase.from('classes').update({ active: false }).in('id', stillActive.map((c) => c.id))
+        if (retireErr) {
+          console.error('SeasonRollover: retiring source season failed —', retireErr)
+          retireErrMsg = ` Classes were copied, but retiring ${sourceSeason}'s classes FAILED (${retireErr.message}) — they're still active and will keep showing on the registration form. Try again or retire them manually in Classes.`
+        } else {
+          retiredCount = stillActive.length
+        }
       }
     }
     setRunning(false)
     setResult(
-      `Copied ${payload.length} class${payload.length !== 1 ? 'es' : ''} into ${targetSeason}.` +
+      `Copied ${copiedCount} class${copiedCount !== 1 ? 'es' : ''} into ${targetSeason}.` +
       (retiredCount ? ` Also retired ${retiredCount} class${retiredCount !== 1 ? 'es' : ''} from ${sourceSeason} so they no longer show up on the public registration form.` : '') +
+      retireErrMsg +
       ` Students were NOT auto-enrolled — re-enroll returning students in the new season's classes via Enrollments.`
     )
     load()
@@ -2642,18 +2893,31 @@ function PrivacySettings() {
   const [s, setS] = useState(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState('')
+  const [loadErr, setLoadErr] = useState('')
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
+      const { data, error } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
+      if (error) {
+        console.error('PrivacySettings: load failed —', error)
+        setLoadErr(error.message)
+        return
+      }
       setS(data)
     })()
   }, [])
   async function save() {
     setSaving(true)
-    await supabase.from('privacy_settings').update(s).eq('id', 1)
-    setSaving(false); setSaved('Saved ✓'); setTimeout(() => setSaved(''), 2000)
+    const { error } = await supabase.from('privacy_settings').update(s).eq('id', 1)
+    setSaving(false)
+    if (error) {
+      console.error('PrivacySettings: save failed —', error)
+      setSaved(`Could not save: ${error.message}`)
+      return
+    }
+    setSaved('Saved ✓'); setTimeout(() => setSaved((n) => n === 'Saved ✓' ? '' : n), 2000)
   }
   function toggle(key) { setS({ ...s, [key]: !s[key] }) }
+  if (loadErr) return <div className="card card-pad" style={{ color: '#b23838' }}>Could not load privacy settings: {loadErr}. Refresh to try again — these settings are unchanged, not lost.</div>
   if (!s) return <div className="loading">Loading…</div>
   const ROWS = [
     ['hide_student_pictures', 'Hide student pictures', 'Student photos never appear on printed rosters or shared views, even to other staff without direct access.'],
@@ -2678,7 +2942,7 @@ function PrivacySettings() {
         ))}
         <div style={{ marginTop: 18, display: 'flex', gap: 12, alignItems: 'center' }}>
           <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
-          {saved && <span style={{ color: 'var(--ok)', fontSize: 14, fontWeight: 500 }}>{saved}</span>}
+          {saved && <span style={{ color: saved.startsWith('Could not') ? '#b23838' : 'var(--ok)', fontSize: 14, fontWeight: 500 }}>{saved}</span>}
         </div>
       </div>
     </>
@@ -2711,7 +2975,11 @@ function Volunteers() {
   }, [])
   useEffect(() => { loadInquiries(); loadRoster() }, [loadInquiries, loadRoster])
 
-  async function dismissInquiry(id) { await supabase.from('volunteer_inquiries').update({ processed: true }).eq('id', id); loadInquiries() }
+  async function dismissInquiry(id) {
+    const { error } = await supabase.from('volunteer_inquiries').update({ processed: true }).eq('id', id)
+    if (error) { console.error('Volunteers: dismissInquiry failed —', error); alert(`Could not dismiss: ${error.message}`); return }
+    loadInquiries()
+  }
 
   function toggleAssignRole(role) {
     setAssignRoles((r) => r.includes(role) ? r.filter((x) => x !== role) : [...r, role])
@@ -2740,15 +3008,27 @@ function Volunteers() {
   function toggleEditRole(role) {
     setEdit((e) => ({ ...e, roles: e.roles.includes(role) ? e.roles.filter((x) => x !== role) : [...e.roles, role] }))
   }
+  const [rosterSaveErr, setRosterSaveErr] = useState('')
   async function save() {
-    setSaving(true)
+    setSaving(true); setRosterSaveErr('')
     const payload = { name: edit.name, email: edit.email || null, phone: edit.phone || null, roles: edit.roles, active: edit.active, notes: edit.notes || null }
-    if (edit.id) await supabase.from('volunteers').update(payload).eq('id', edit.id)
-    else await supabase.from('volunteers').insert(payload)
-    setSaving(false); setEdit(null); loadRoster()
+    const { error } = edit.id
+      ? await supabase.from('volunteers').update(payload).eq('id', edit.id)
+      : await supabase.from('volunteers').insert(payload)
+    setSaving(false)
+    if (error) { console.error('Volunteers: save failed —', error); setRosterSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); loadRoster()
   }
-  async function toggleActive(v) { await supabase.from('volunteers').update({ active: !v.active }).eq('id', v.id); loadRoster() }
-  async function remove(id) { await supabase.from('volunteers').delete().eq('id', id); loadRoster() }
+  async function toggleActive(v) {
+    const { error } = await supabase.from('volunteers').update({ active: !v.active }).eq('id', v.id)
+    if (error) { console.error('Volunteers: toggleActive failed —', error); alert(`Could not update: ${error.message}`); return }
+    loadRoster()
+  }
+  async function remove(id) {
+    const { error } = await supabase.from('volunteers').delete().eq('id', id)
+    if (error) { console.error('Volunteers: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    loadRoster()
+  }
 
   if (inquiries === null || roster === null) return <div className="loading">Loading…</div>
 
@@ -2852,7 +3132,8 @@ function Volunteers() {
       )}
 
       {edit && (
-        <Modal title={edit.id ? 'Edit volunteer' : 'Add volunteer'} onClose={() => setEdit(null)} onSave={save} saving={saving}>
+        <Modal title={edit.id ? 'Edit volunteer' : 'Add volunteer'} onClose={() => { setEdit(null); setRosterSaveErr('') }} onSave={save} saving={saving}>
+          {rosterSaveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{rosterSaveErr}</div>}
           <Field label="Name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
           <div className="field row2">
             <Field label="Email" value={edit.email || ''} onChange={(e) => setEdit({ ...edit, email: e.target.value })} />
@@ -2883,7 +3164,11 @@ function InterestList() {
     setRows(data || [])
   }, [])
   useEffect(() => { load() }, [load])
-  async function remove(id) { await supabase.from('contact_interest').delete().eq('id', id); load() }
+  async function remove(id) {
+    const { error } = await supabase.from('contact_interest').delete().eq('id', id)
+    if (error) { console.error('InterestList: remove failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
   if (!rows) return <div className="loading">Loading…</div>
   const emails = rows.map((r) => r.email).filter(Boolean)
   return (
@@ -2960,7 +3245,24 @@ export default function App() {
   useEffect(() => {
     if (!session) { setRoleLoaded(false); return }
     ;(async () => {
-      const { data } = await supabase.from('staff_roles').select('role, teacher_id, allowed_screens').eq('user_id', session.user.id).maybeSingle()
+      const { data, error } = await supabase.from('staff_roles').select('role, teacher_id, allowed_screens').eq('user_id', session.user.id).maybeSingle()
+      // FAIL CLOSED, not open. If this query errors, `data` is undefined —
+      // which used to mean role !== 'teacher', so the app silently treated
+      // a restricted teacher account as a FULL ADMIN with every screen
+      // visible, including Families and Registrations that teachers are
+      // specifically blocked from. This isn't hypothetical: this exact
+      // table already hit an infinite-recursion RLS policy error once on
+      // this project, and a transient network failure would do the same.
+      // On error, assume the most restricted role instead of the least.
+      if (error) {
+        console.error('Could not load staff permissions — defaulting to the most restricted access. Refresh to retry.', error)
+        setIsTeacher(true)
+        setMyTeacherId(null)
+        setAllowedScreens(['attendance'])
+        setRoleLoaded(true)
+        setPage('attendance')
+        return
+      }
       const teacher = data?.role === 'teacher'
       setIsTeacher(teacher)
       setMyTeacherId(data?.teacher_id || null)
