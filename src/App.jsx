@@ -1937,13 +1937,29 @@ function Attendance({ myTeacherId }) {
     setEditingPeriod(false)
   }
 
+  const [rosterErr, setRosterErr] = useState('')
   const loadRoster = useCallback(async () => {
     if (!classId || !date) { setRoster(null); return }
-    const { data: enr } = await supabase.from('enrollments').select('id, students(id, first_name, last_name, families(email, parent_first_name, parent_last_name))').eq('class_id', classId).eq('status', 'enrolled')
+    setRosterErr('')
+    const { data: enr, error: enrErr } = await supabase.from('enrollments').select('id, students(id, first_name, last_name, families(email, parent_first_name, parent_last_name))').eq('class_id', classId).eq('status', 'enrolled')
+    if (enrErr) {
+      console.error('Attendance: loading roster failed —', enrErr)
+      setRosterErr(`Could not load the roster: ${enrErr.message}`)
+      setRoster([])
+      return
+    }
     const ids = (enr || []).map((e) => e.id)
     const existing = {}
     if (ids.length) {
-      const { data: att } = await supabase.from('attendance').select('enrollment_id, present, status').eq('class_date', date).in('enrollment_id', ids)
+      const { data: att, error: attErr } = await supabase.from('attendance').select('enrollment_id, present, status').eq('class_date', date).in('enrollment_id', ids)
+      if (attErr) {
+        // The roster itself loaded fine here — only the "who's already
+        // marked" lookup failed. Still surfaced, since otherwise this would
+        // silently show everyone as unmarked even if they'd already been
+        // saved for this date, which risks a real duplicate/overwrite.
+        console.error('Attendance: loading existing marks failed —', attErr)
+        setRosterErr(`Loaded the roster, but couldn't check for already-saved marks: ${attErr.message}. Saving now could overwrite existing data — reload before continuing.`)
+      }
       for (const a of att || []) existing[a.enrollment_id] = a.status || (a.present ? 'present' : 'absent')
     }
     setRoster((enr || []).map((e) => ({
@@ -2090,12 +2106,15 @@ function Attendance({ myTeacherId }) {
         <div className="spacer" />
         {roster && <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{presentCount} of {roster.length} present</span>}
       </div>
+      {rosterErr && (
+        <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{rosterErr}</div>
+      )}
       {!classId ? (
         <div className="card"><div className="empty"><h3>Choose a class</h3><p>Attendance shows the enrolled students for the class and date you pick.</p></div></div>
       ) : !roster ? (
         <div className="loading">Loading…</div>
       ) : roster.length === 0 ? (
-        <div className="card"><div className="empty"><h3>No enrolled students</h3><p>This class has no students with "enrolled" status yet.</p></div></div>
+        <div className="card"><div className="empty"><h3>No enrolled students</h3><p>Nobody has "enrolled" status in this specific class. If you expected students here, check Enrollments — they may be Waitlisted, Dropped, or enrolled in a different class than the one selected above.</p></div></div>
       ) : (
         <>
           <div className="table-wrap"><table>
