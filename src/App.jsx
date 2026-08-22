@@ -658,6 +658,12 @@ function Families() {
       {edit && (
         <Modal title={edit.id ? 'Edit family' : 'Add family'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
           {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
+          {edit.id && (
+            <div style={{ background: 'var(--sand)', border: '1px solid var(--line)', borderRadius: 8, padding: '10px 12px', fontSize: 13.5, marginBottom: 16 }}>
+              <strong>Student{(studentCounts[edit.id] || []).length === 1 ? '' : 's'}:</strong>{' '}
+              {(studentCounts[edit.id] || []).length ? studentCounts[edit.id].join(', ') : 'None linked to this family yet.'}
+            </div>
+          )}
           <div className="field row2">
             <Field label="Parent first name" value={edit.parent_first_name} onChange={(e) => setEdit({ ...edit, parent_first_name: e.target.value })} />
             <Field label="Parent last name" value={edit.parent_last_name} onChange={(e) => setEdit({ ...edit, parent_last_name: e.target.value })} />
@@ -752,13 +758,13 @@ function Families() {
 }
 
 const BLANK_STUDENT = { first_name: '', last_name: '', grade: '', level: 'Beginner', family_id: '', season_status: 'inactive', medical_notes: '', notes: '' }
-function Students() {
+function Students({ needsClassOnly = false } = {}) {
   const [rows, setRows] = useState(null)
   const [families, setFamilies] = useState([])
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [q, setQ] = useState('')
-  const [statusFilter, setStatusFilter] = useState('active')
+  const [statusFilter, setStatusFilter] = useState(needsClassOnly ? 'inactive' : 'active')
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
   const sort = useSort('name')
@@ -954,7 +960,15 @@ function Students() {
   const filtered = applySort(
     rows
       .filter((s) => `${s.first_name} ${s.last_name}`.toLowerCase().includes(q.toLowerCase()))
-      .filter((s) => statusFilter === 'all' ? true : (s.season_status || 'active') === statusFilter),
+      .filter((s) => statusFilter === 'all' ? true : (s.season_status || 'active') === statusFilter)
+      // This is what makes this view actually mean "needs a class," not
+      // just "inactive" — someone who registered, picked "Not sure yet,"
+      // and hasn't been placed anywhere shows up here. An inactive student
+      // who WAS placed and later dropped everything would too, which is
+      // arguably still useful (they also need attention), but the primary
+      // case this solves is Corrie's: a real registration with nowhere to
+      // land except the raw Registrations log.
+      .filter((s) => !needsClassOnly || !(enrollMap[s.id] && enrollMap[s.id].length)),
     sort,
     {
       name: (s) => `${s.last_name} ${s.first_name}`.toLowerCase(),
@@ -968,24 +982,41 @@ function Students() {
   return (
     <>
       <div className="page-head">
-        <div><h1>Students</h1><p>Every dancer, linked to a family.</p></div>
+        <div>
+          <h1>{needsClassOnly ? 'Needs a Class' : 'Students'}</h1>
+          <p>{needsClassOnly
+            ? `Registered but not placed in a class yet — usually because they picked "Not sure yet" at registration, or a class they picked no longer exists. ${filtered.length} right now.`
+            : 'Every dancer, linked to a family.'}</p>
+        </div>
         <button className="btn" onClick={() => setEdit({ ...BLANK_STUDENT })}>Add student</button>
       </div>
       <div className="toolbar">
         <input placeholder="Search students…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-          <option value="active">Active only</option>
-          <option value="inactive">Inactive only</option>
-          <option value="all">All students</option>
-        </select>
-        <button className="btn ghost small" onClick={selectAllInactive}>Select all Inactive</button>
+        {!needsClassOnly && (
+          <>
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="active">Active only</option>
+              <option value="inactive">Inactive only</option>
+              <option value="all">All students</option>
+            </select>
+            <button className="btn ghost small" onClick={selectAllInactive}>Select all Inactive</button>
+          </>
+        )}
         {selectedIds.size > 0 && (
           <>
             <div className="spacer" />
             <span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{selectedIds.size} selected</span>
-            <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('inactive')}>Mark Inactive</button>
-            <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('active')}>Mark Active</button>
-            <button className="btn danger small" disabled={bulkBusy} onClick={openBulkDeleteConfirm}>Delete selected</button>
+            {!needsClassOnly && (
+              <>
+                <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('inactive')}>Mark Inactive</button>
+                <button className="btn ghost small" disabled={bulkBusy} onClick={() => bulkSetStatus('active')}>Mark Active</button>
+                <button className="btn danger small" disabled={bulkBusy} onClick={openBulkDeleteConfirm}>Delete selected</button>
+              </>
+            )}
+            <EmailGroupButton
+              emails={[...new Set(rows.filter((s) => selectedIds.has(s.id) && s.families?.email).map((s) => s.families.email))]}
+              label={`${selectedIds.size} selected famil${selectedIds.size === 1 ? 'y' : 'ies'}`}
+            />
             <button className="btn ghost small" onClick={() => setSelectedIds(new Set())}>Clear</button>
           </>
         )}
@@ -2068,6 +2099,21 @@ function Attendance({ myTeacherId }) {
     for (const r of roster.filter((r) => r.status === 'tardy' || r.status === 'absent')) checkAlertsForStudent(r)
   }
 
+  // Auto-saves whatever's currently marked before switching class or date —
+  // this is what makes "I changed some statuses, then clicked to a
+  // different date without hitting Save" behave the way you'd expect
+  // instead of quietly discarding the changes. Harmless to call even if
+  // nothing actually changed (re-saving identical data is a no-op in
+  // effect). Runs silently, no confirmation prompt.
+  async function switchClass(newId) {
+    if (classId && date && roster && roster.length) await save()
+    setClassId(newId)
+  }
+  async function switchDate(newDate) {
+    if (classId && date && roster && roster.length) await save()
+    setDate(newDate)
+  }
+
   const presentCount = roster ? roster.filter((r) => r.status === 'present' || r.status === 'tardy').length : 0
   const statusLabel = { present: '✓ Present', tardy: 'T Tardy', absent: '○ Absent', '': 'Tap to mark' }
   const statusPill = { present: 'enrolled', tardy: 'waitlist', absent: 'dropped', '': 'inactive' }
@@ -2098,11 +2144,11 @@ function Attendance({ myTeacherId }) {
         </div>
       )}
       <div className="toolbar">
-        <select value={classId} onChange={(e) => setClassId(e.target.value)}>
+        <select value={classId} onChange={(e) => switchClass(e.target.value)}>
           <option value="">— choose a class —</option>
           {classes.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.day_of_week})</option>)}
         </select>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <input type="date" value={date} onChange={(e) => switchDate(e.target.value)} />
         <div className="spacer" />
         {roster && <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{presentCount} of {roster.length} present</span>}
       </div>
@@ -3224,6 +3270,7 @@ const NAV = [
   { key: 'classes', label: 'Classes' },
   { key: 'rooms', label: 'Rooms' },
   { key: 'students', label: 'Students' },
+  { key: 'needs-class', label: 'Needs a Class' },
   { key: 'families', label: 'Families' },
   { key: 'teachers', label: 'Teachers' },
   { key: 'teacher-access', label: 'Teacher Access' },
@@ -3335,6 +3382,7 @@ export default function App() {
         {safePage === 'my-classes' && <MyClasses myTeacherId={myTeacherId} />}
         {safePage === 'classes' && <Classes onOpenRoster={(id) => { setJumpClassId(id); setPage('enrollments') }} />}
         {safePage === 'students' && <Students />}
+        {safePage === 'needs-class' && !isTeacher && <Students needsClassOnly />}
         {safePage === 'families' && !isTeacher && <Families />}
         {safePage === 'teachers' && <Teachers />}
         {safePage === 'photos' && <Photos />}
