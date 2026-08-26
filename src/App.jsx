@@ -2045,6 +2045,40 @@ function Attendance({ myTeacherId }) {
     setEditingPeriod(false)
   }
 
+  const [rechecking, setRechecking] = useState(false)
+  const [recheckMsg, setRecheckMsg] = useState('')
+  // THE FIX for "I set the period but no alerts sent": the alert check
+  // only ever ran at the exact moment attendance was saved. It never
+  // looked backward at data that already existed BEFORE a period was set
+  // or changed — so setting a period today does nothing for attendance
+  // marked last week, no matter how many thresholds it already crossed.
+  // This runs every current student through the same check used at save
+  // time, against whatever period is set right now. Safe to run as many
+  // times as needed — attendance_alerts_sent still guarantees each alert
+  // only ever goes out once per student per threshold per period, so this
+  // can never cause a duplicate email.
+  async function recheckAllAlerts() {
+    if (!period.start || !period.end) { alert('Set the alert period first — there\'s nothing to check it against yet.'); return }
+    setRechecking(true); setRecheckMsg('')
+    const { data: studs, error } = await supabase.from('students').select('id, first_name, last_name, families(email, parent_first_name)')
+    if (error) {
+      console.error('Attendance: recheckAllAlerts could not load students —', error)
+      setRechecking(false)
+      setRecheckMsg(`Could not run the check: ${error.message}`)
+      return
+    }
+    for (const s of studs || []) {
+      await checkAlertsForStudent({
+        student_id: s.id,
+        name: `${s.first_name} ${s.last_name}`,
+        parentEmail: s.families?.email || '',
+        parentFirstName: s.families?.parent_first_name || '',
+      })
+    }
+    setRechecking(false)
+    setRecheckMsg(`Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'} against the current period. Any alert that hadn't already gone out and is now due should be sending.`)
+  }
+
   const [rosterErr, setRosterErr] = useState('')
   const loadRoster = useCallback(async () => {
     if (!classId || !date) { setRoster(null); return }
@@ -2246,6 +2280,9 @@ function Attendance({ myTeacherId }) {
                 {period.start && period.end ? `${period.start} to ${period.end}` : <span style={{ color: '#b23838' }}>not set — 2nd/3rd tardy/absence alerts are OFF until this is set</span>}
               </span>
               <button className="btn ghost small" onClick={() => setEditingPeriod(true)}>{period.start ? 'Change period' : 'Set period'}</button>
+              <button className="btn small" onClick={recheckAllAlerts} disabled={rechecking || !period.start}>
+                {rechecking ? 'Checking…' : 'Check all students against this period'}
+              </button>
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -2255,8 +2292,12 @@ function Attendance({ myTeacherId }) {
               <button className="btn ghost small" onClick={() => setEditingPeriod(false)}>Cancel</button>
             </div>
           )}
+          {recheckMsg && (
+            <p style={{ fontSize: 13, color: recheckMsg.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)', marginTop: 10, marginBottom: 0 }}>{recheckMsg}</p>
+          )}
           <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: 8, marginBottom: 0 }}>
             2nd/3rd tardy and 2nd/3rd absence alerts email the parent (and shineGHFC@gmail.com) automatically, counted within this date range only. Update this at the start of each new semester — each alert only ever sends once per student per threshold per period, so changing the dates here starts a fresh count.
+            {' '}<strong>Alerts only check automatically when you save NEW attendance</strong> — if you set or change the period after attendance already exists, use "Check all students against this period" above to catch anything already due, since nothing re-checks old data on its own.
           </p>
         </div>
       )}
