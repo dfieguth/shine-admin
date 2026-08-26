@@ -758,6 +758,51 @@ function Families() {
 }
 
 const BLANK_STUDENT = { first_name: '', last_name: '', grade: '', level: 'Beginner', family_id: '', season_status: 'inactive', medical_notes: '', notes: '' }
+// A student's all-time tardy/absence totals plus a chronological list —
+// the "counter/tracker synced with the student record" Corrie asked for.
+// Deliberately all-time, not scoped to the current alert period: this is a
+// general reference on the student's own record, separate from the
+// period-scoped count that decides whether a 2nd/3rd-threshold alert email
+// fires. The two numbers can legitimately differ once a new period starts.
+function StudentAttendanceSummary({ studentId }) {
+  const [rows, setRows] = useState(null)
+  useEffect(() => {
+    setRows(null)
+    ;(async () => {
+      const { data: enr } = await supabase.from('enrollments').select('id, classes(name)').eq('student_id', studentId)
+      const enrMap = {}
+      for (const e of enr || []) enrMap[e.id] = e.classes?.name || 'Unknown class'
+      const enrIds = Object.keys(enrMap)
+      if (!enrIds.length) { setRows([]); return }
+      const { data: att } = await supabase.from('attendance').select('class_date, status, absence_reason, enrollment_id').in('enrollment_id', enrIds).order('class_date', { ascending: false })
+      setRows((att || []).map((a) => ({ ...a, className: enrMap[a.enrollment_id] })))
+    })()
+  }, [studentId])
+  if (rows === null) return <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Loading attendance…</p>
+  const tardyCount = rows.filter((r) => r.status === 'tardy').length
+  const absentCount = rows.filter((r) => r.status === 'absent').length
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 24, margin: '4px 0 12px' }}>
+        <span><strong style={{ fontSize: 20 }}>{tardyCount}</strong> <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>tard{tardyCount === 1 ? 'y' : 'ies'} (all time)</span></span>
+        <span><strong style={{ fontSize: 20 }}>{absentCount}</strong> <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>absence{absentCount === 1 ? '' : 's'} (all time)</span></span>
+      </div>
+      {rows.length === 0 ? (
+        <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>No attendance recorded yet.</p>
+      ) : (
+        <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 4 }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ padding: '6px 10px', borderBottom: i < rows.length - 1 ? '1px solid var(--line)' : 'none', fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span>{new Date(r.class_date + 'T00:00').toLocaleDateString()} · {r.className}</span>
+              <span className={`pill ${r.status === 'present' ? 'enrolled' : r.status === 'tardy' ? 'waitlist' : 'dropped'}`}>{r.status}{r.absence_reason ? ` — ${r.absence_reason}` : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
 function Students({ needsClassOnly = false } = {}) {
   const [rows, setRows] = useState(null)
   const [families, setFamilies] = useState([])
@@ -1163,6 +1208,9 @@ function Students({ needsClassOnly = false } = {}) {
               <div className="vp-row"><span>Birthday</span><span>{viewing.birthday || '—'}</span></div>
               <div className="vp-row"><span>Classes</span><span>{(enrollMap[viewing.id] || []).join(', ') || '—'}</span></div>
               <div className="vp-row"><span>Registered</span><span>{viewing.registered_at ? new Date(viewing.registered_at).toLocaleDateString() : '—'}</span></div>
+
+              <p className="vp-section">Attendance</p>
+              <StudentAttendanceSummary studentId={viewing.id} />
 
               <p className="vp-section">Family</p>
               {viewing.families ? (
@@ -1933,11 +1981,40 @@ function Attendance({ myTeacherId }) {
   const [classes, setClasses] = useState([])
   const [classId, setClassId] = useState('')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [dateErr, setDateErr] = useState('')
   const [roster, setRoster] = useState(null)
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
   const [period, setPeriod] = useState({ start: '', end: '' })
   const [editingPeriod, setEditingPeriod] = useState(false)
+  const [existingSheet, setExistingSheet] = useState(false) // true when the selected class+date already has saved marks — makes clear this is an EDIT, not a fresh sheet
+
+  // Finds the nearest date (on/after `from`) that falls on `dayName` — used
+  // both to auto-suggest a sensible date the moment a class is picked, and
+  // to validate a manually-typed date actually falls on the right weekday
+  // for that class. Native <input type="date"> can't restrict which
+  // weekdays are pickable on its own, so this is enforced in JS instead.
+  function nextDateForDay(dayName, from = new Date()) {
+    const target = CLASS_DAY_ORDER.indexOf(dayName)
+    if (target === -1) return from.toISOString().slice(0, 10)
+    const d = new Date(from)
+    // JS getDay(): 0=Sunday...6=Saturday. CLASS_DAY_ORDER: 0=Monday...6=Sunday.
+    const jsTarget = (target + 1) % 7
+    let diff = (jsTarget - d.getDay() + 7) % 7
+    d.setDate(d.getDate() + diff)
+    return d.toISOString().slice(0, 10)
+  }
+  function dateMatchesDay(dateStr, dayName) {
+    if (!dayName || !dateStr) return true
+    const target = CLASS_DAY_ORDER.indexOf(dayName)
+    if (target === -1) return true
+    const jsTarget = (target + 1) % 7
+    // Parse as local date, not UTC, so this matches what the date picker
+    // actually shows — new Date('2026-09-01') parses as UTC midnight,
+    // which can land on the wrong day depending on timezone.
+    const [y, m, d] = dateStr.split('-').map(Number)
+    return new Date(y, m - 1, d).getDay() === jsTarget
+  }
 
   useEffect(() => {
     (async () => {
@@ -1982,7 +2059,7 @@ function Attendance({ myTeacherId }) {
     const ids = (enr || []).map((e) => e.id)
     const existing = {}
     if (ids.length) {
-      const { data: att, error: attErr } = await supabase.from('attendance').select('enrollment_id, present, status').eq('class_date', date).in('enrollment_id', ids)
+      const { data: att, error: attErr } = await supabase.from('attendance').select('enrollment_id, present, status, absence_reason').eq('class_date', date).in('enrollment_id', ids)
       if (attErr) {
         // The roster itself loaded fine here — only the "who's already
         // marked" lookup failed. Still surfaced, since otherwise this would
@@ -1991,7 +2068,10 @@ function Attendance({ myTeacherId }) {
         console.error('Attendance: loading existing marks failed —', attErr)
         setRosterErr(`Loaded the roster, but couldn't check for already-saved marks: ${attErr.message}. Saving now could overwrite existing data — reload before continuing.`)
       }
-      for (const a of att || []) existing[a.enrollment_id] = a.status || (a.present ? 'present' : 'absent')
+      for (const a of att || []) existing[a.enrollment_id] = { status: a.status || (a.present ? 'present' : 'absent'), reason: a.absence_reason || '' }
+      setExistingSheet(Object.keys(existing).length > 0)
+    } else {
+      setExistingSheet(false)
     }
     setRoster((enr || []).map((e) => ({
       enrollment_id: e.id,
@@ -2002,14 +2082,16 @@ function Attendance({ myTeacherId }) {
       // through — which is why attendance alert emails to parents used to
       // open by greeting the STUDENT by name instead of the parent.
       parentFirstName: e.students?.families?.parent_first_name || '',
-      status: existing[e.id] ?? '',
+      status: existing[e.id]?.status ?? '',
+      reason: existing[e.id]?.reason ?? '',
     })))
   }, [classId, date])
   useEffect(() => { loadRoster() }, [loadRoster])
 
   // Tap cycles: unmarked → present → tardy → absent → unmarked
   const NEXT = { '': 'present', present: 'tardy', tardy: 'absent', absent: '' }
-  function toggle(id) { setRoster(roster.map((r) => r.enrollment_id === id ? { ...r, status: NEXT[r.status] } : r)) }
+  function toggle(id) { setRoster(roster.map((r) => r.enrollment_id === id ? { ...r, status: NEXT[r.status], reason: NEXT[r.status] === 'absent' ? r.reason : '' } : r)) }
+  function setReason(id, reason) { setRoster(roster.map((r) => r.enrollment_id === id ? { ...r, reason } : r)) }
 
   // Checks one student's tardy/absent counts for the current period against
   // the 2nd/3rd thresholds. attendance_alerts_sent guarantees each alert
@@ -2083,6 +2165,7 @@ function Attendance({ myTeacherId }) {
       const { error: insertErr } = await supabase.from('attendance').insert(marked.map((r) => ({
         enrollment_id: r.enrollment_id, class_date: date, status: r.status,
         present: r.status === 'present' || r.status === 'tardy',
+        absence_reason: r.status === 'absent' ? (r.reason || null) : null,
       })))
       if (insertErr) {
         console.error('Attendance: saving marks failed —', insertErr)
@@ -2107,9 +2190,25 @@ function Attendance({ myTeacherId }) {
   // effect). Runs silently, no confirmation prompt.
   async function switchClass(newId) {
     if (classId && date && roster && roster.length) await save()
+    setDateErr('')
+    const cls = classes.find((c) => c.id === newId)
+    // If the currently-picked date already falls on this class's day,
+    // leave it alone (keeps continuity if you're just re-selecting the
+    // class you're already working on). Otherwise jump to the nearest
+    // upcoming date that's actually the right day of the week — this is
+    // what makes a Monday class only ever suggest Monday dates by default.
+    if (cls && !dateMatchesDay(date, cls.day_of_week)) {
+      setDate(nextDateForDay(cls.day_of_week))
+    }
     setClassId(newId)
   }
   async function switchDate(newDate) {
+    const cls = classes.find((c) => c.id === classId)
+    if (cls && !dateMatchesDay(newDate, cls.day_of_week)) {
+      setDateErr(`${cls.name} meets on ${cls.day_of_week}s — ${new Date(newDate + 'T00:00').toLocaleDateString(undefined, { weekday: 'long' })} isn't a valid date for this class. Pick a ${cls.day_of_week}.`)
+      return // reject the date — this is what makes the picker effectively "only give Monday dates" for a Monday class
+    }
+    setDateErr('')
     if (classId && date && roster && roster.length) await save()
     setDate(newDate)
   }
@@ -2117,9 +2216,27 @@ function Attendance({ myTeacherId }) {
   const presentCount = roster ? roster.filter((r) => r.status === 'present' || r.status === 'tardy').length : 0
   const statusLabel = { present: '✓ Present', tardy: 'T Tardy', absent: '○ Absent', '': 'Tap to mark' }
   const statusPill = { present: 'enrolled', tardy: 'waitlist', absent: 'dropped', '': 'inactive' }
+  const [tab, setTab] = useState('mark') // 'mark' | 'history'
+  // Opens a specific saved sheet from History back in the Mark tab. The
+  // date is already known-valid (it came from a real saved record), so
+  // this bypasses switchDate's day-of-week validation on purpose.
+  function openSheet(cls, sheetDate) {
+    setDateErr('')
+    setClassId(cls)
+    setDate(sheetDate)
+    setTab('mark')
+  }
   return (
     <>
       <div className="page-head"><div><h1>Attendance</h1><p>Pick a class and a date, check off who's here, save.</p></div></div>
+      <div className="view-toggle" style={{ marginBottom: 16 }}>
+        <button className={tab === 'mark' ? 'active' : ''} onClick={() => setTab('mark')}>Mark Attendance</button>
+        <button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Search Saved Sheets</button>
+      </div>
+      {tab === 'history' ? (
+        <AttendanceHistory myTeacherId={myTeacherId} onOpen={openSheet} />
+      ) : (
+      <>
       {!myTeacherId && (
         <div className="card" style={{ marginBottom: 16 }}>
           {!editingPeriod ? (
@@ -2155,6 +2272,14 @@ function Attendance({ myTeacherId }) {
       {rosterErr && (
         <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{rosterErr}</div>
       )}
+      {dateErr && (
+        <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{dateErr}</div>
+      )}
+      {existingSheet && !dateErr && (
+        <div style={{ background: '#fdf9f0', border: '1px solid #e8cf9f', color: '#a3741f', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>
+          A sheet already exists for this class and date — you're editing it, not starting a fresh one.
+        </div>
+      )}
       {!classId ? (
         <div className="card"><div className="empty"><h3>Choose a class</h3><p>Attendance shows the enrolled students for the class and date you pick.</p></div></div>
       ) : !roster ? (
@@ -2164,12 +2289,24 @@ function Attendance({ myTeacherId }) {
       ) : (
         <>
           <div className="table-wrap"><table>
-            <thead><tr><th>Student</th><th>Status (tap row to cycle)</th></tr></thead>
+            <thead><tr><th>Student</th><th>Status (tap row to cycle)</th><th>Reason for absence</th></tr></thead>
             <tbody>
               {roster.map((r) => (
-                <tr key={r.enrollment_id} onClick={() => toggle(r.enrollment_id)} style={{ cursor: 'pointer' }}>
-                  <td data-label="Student"><strong>{r.name}</strong></td>
-                  <td data-label="Status"><span className={`pill ${statusPill[r.status]}`}>{statusLabel[r.status]}</span></td>
+                <tr key={r.enrollment_id}>
+                  <td data-label="Student" onClick={() => toggle(r.enrollment_id)} style={{ cursor: 'pointer' }}><strong>{r.name}</strong></td>
+                  <td data-label="Status" onClick={() => toggle(r.enrollment_id)} style={{ cursor: 'pointer' }}><span className={`pill ${statusPill[r.status]}`}>{statusLabel[r.status]}</span></td>
+                  <td data-label="Reason for absence">
+                    {r.status === 'absent' ? (
+                      <input
+                        type="text"
+                        placeholder="Optional — sick, family trip, etc."
+                        value={r.reason}
+                        onChange={(e) => setReason(r.enrollment_id, e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ width: '100%', maxWidth: 260 }}
+                      />
+                    ) : <span style={{ color: 'var(--ink-soft)' }}>—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -2179,6 +2316,102 @@ function Attendance({ myTeacherId }) {
             {savedMsg && <span style={{ color: savedMsg.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)', fontSize: 14, fontWeight: 500 }}>{savedMsg}</span>}
           </div>
         </>
+      )}
+      </>
+      )}
+    </>
+  )
+}
+
+// Searchable list of every saved attendance sheet — by class name, day of
+// week, date, or the name of a student who appears on it. Groups the raw
+// per-student attendance rows into one row per (class, date) "sheet,"
+// since that's the natural unit Corrie thinks in ("the Monday Ballet III
+// sheet from Aug 24"), not individual marks.
+function AttendanceHistory({ myTeacherId, onOpen }) {
+  const [sheets, setSheets] = useState(null)
+  const [q, setQ] = useState('')
+  const [dayFilter, setDayFilter] = useState('')
+  const [studentQ, setStudentQ] = useState('')
+  const [loadErr, setLoadErr] = useState('')
+
+  const load = useCallback(async () => {
+    setLoadErr('')
+    let classQuery = supabase.from('classes').select('id, name, day_of_week')
+    if (myTeacherId) classQuery = classQuery.eq('teacher_id', myTeacherId)
+    const { data: classesData, error: classErr } = await classQuery
+    if (classErr) { console.error('AttendanceHistory: loading classes failed —', classErr); setLoadErr(classErr.message); setSheets([]); return }
+    const classMap = {}
+    for (const c of classesData || []) classMap[c.id] = c
+    const classIds = (classesData || []).map((c) => c.id)
+    if (!classIds.length) { setSheets([]); return }
+
+    const { data: enrData, error: enrErr } = await supabase.from('enrollments').select('id, class_id, students(first_name, last_name)').in('class_id', classIds)
+    if (enrErr) { console.error('AttendanceHistory: loading enrollments failed —', enrErr); setLoadErr(enrErr.message); setSheets([]); return }
+    const enrMap = {}
+    for (const e of enrData || []) enrMap[e.id] = { classId: e.class_id, studentName: e.students ? `${e.students.first_name} ${e.students.last_name}` : '' }
+    const enrIds = Object.keys(enrMap)
+    if (!enrIds.length) { setSheets([]); return }
+
+    const { data: attData, error: attErr } = await supabase.from('attendance').select('class_date, status, enrollment_id').in('enrollment_id', enrIds)
+    if (attErr) { console.error('AttendanceHistory: loading attendance failed —', attErr); setLoadErr(attErr.message); setSheets([]); return }
+
+    const groups = {}
+    for (const a of attData || []) {
+      const enr = enrMap[a.enrollment_id]
+      if (!enr) continue
+      const cls = classMap[enr.classId]
+      if (!cls) continue
+      const key = `${enr.classId}|${a.class_date}`
+      if (!groups[key]) groups[key] = { classId: enr.classId, className: cls.name, day: cls.day_of_week, date: a.class_date, present: 0, tardy: 0, absent: 0, students: [] }
+      groups[key][a.status] = (groups[key][a.status] || 0) + 1
+      if (enr.studentName) groups[key].students.push(enr.studentName)
+    }
+    setSheets(Object.values(groups).sort((a, b) => b.date.localeCompare(a.date)))
+  }, [myTeacherId])
+  useEffect(() => { load() }, [load])
+
+  if (sheets === null) return <div className="loading">Loading…</div>
+  if (loadErr) return <div className="card" style={{ color: '#b23838' }}>Could not load saved sheets: {loadErr}</div>
+
+  const filtered = sheets.filter((s) =>
+    (!q || s.className.toLowerCase().includes(q.toLowerCase()) || s.date.includes(q)) &&
+    (!dayFilter || s.day === dayFilter) &&
+    (!studentQ || s.students.some((name) => name.toLowerCase().includes(studentQ.toLowerCase())))
+  )
+  const days = [...new Set(sheets.map((s) => s.day))].sort((a, b) => CLASS_DAY_ORDER.indexOf(a) - CLASS_DAY_ORDER.indexOf(b))
+
+  return (
+    <>
+      <div className="toolbar">
+        <input placeholder="Class name or date (e.g. 2026-08-24)…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select value={dayFilter} onChange={(e) => setDayFilter(e.target.value)}>
+          <option value="">All days</option>
+          {days.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <input placeholder="Student name…" value={studentQ} onChange={(e) => setStudentQ(e.target.value)} />
+        <div className="spacer" />
+        <button className="btn ghost small" onClick={() => window.print()}>Print this list</button>
+      </div>
+      {filtered.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No saved sheets found</h3><p>Try a different search, or mark attendance for a class to create one.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Class</th><th>Day</th><th>Date</th><th>Present</th><th>Tardy</th><th>Absent</th><th></th></tr></thead>
+          <tbody>
+            {filtered.map((s, i) => (
+              <tr key={i}>
+                <td data-label="Class"><strong>{s.className}</strong></td>
+                <td data-label="Day">{s.day}</td>
+                <td data-label="Date">{new Date(s.date + 'T00:00').toLocaleDateString()}</td>
+                <td data-label="Present">{s.present || 0}</td>
+                <td data-label="Tardy">{s.tardy || 0}</td>
+                <td data-label="Absent">{s.absent || 0}</td>
+                <td><button className="btn ghost small" onClick={() => onOpen(s.classId, s.date)}>View / Edit</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
       )}
     </>
   )
