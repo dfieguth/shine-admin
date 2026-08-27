@@ -2067,16 +2067,25 @@ function Attendance({ myTeacherId }) {
       setRecheckMsg(`Could not run the check: ${error.message}`)
       return
     }
+    let totalSent = 0, totalFailed = 0
     for (const s of studs || []) {
-      await checkAlertsForStudent({
+      const result = await checkAlertsForStudent({
         student_id: s.id,
         name: `${s.first_name} ${s.last_name}`,
         parentEmail: s.families?.email || '',
         parentFirstName: s.families?.parent_first_name || '',
       })
+      totalSent += result?.sent || 0
+      totalFailed += result?.failed || 0
     }
     setRechecking(false)
-    setRecheckMsg(`Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'} against the current period. Any alert that hadn't already gone out and is now due should be sending.`)
+    setRecheckMsg(
+      totalFailed > 0
+        ? `Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'}. ${totalSent} alert${totalSent === 1 ? '' : 's'} sent, but ${totalFailed} FAILED to send and will need another try — check the browser console for the real error.`
+        : totalSent > 0
+          ? `Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'} — ${totalSent} alert${totalSent === 1 ? '' : 's'} sent successfully.`
+          : `Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'} — nobody is currently due for a new alert.`
+    )
   }
 
   const [rosterErr, setRosterErr] = useState('')
@@ -2134,7 +2143,7 @@ function Attendance({ myTeacherId }) {
   // for this (student, alert_type, period) already exists, the insert fails
   // on the unique constraint and no duplicate email goes out.
   async function checkAlertsForStudent(r) {
-    if (!period.start || !period.end || !r.student_id) return
+    if (!period.start || !period.end || !r.student_id) return { sent: 0, failed: 0 }
     // Only count attendance from enrollments the student is actually still
     // in. This used to have no status filter at all, so attendance from a
     // class they DROPPED still counted toward their tardy/absence totals —
@@ -2142,7 +2151,7 @@ function Attendance({ myTeacherId }) {
     // child is no longer enrolled in.
     const { data: enrRows } = await supabase.from('enrollments').select('id').eq('student_id', r.student_id).eq('status', 'enrolled')
     const enrIds = (enrRows || []).map((e) => e.id)
-    if (!enrIds.length) return
+    if (!enrIds.length) return { sent: 0, failed: 0 }
     const { data: attRows } = await supabase.from('attendance').select('status')
       .in('enrollment_id', enrIds).gte('class_date', period.start).lte('class_date', period.end)
     const tardyCount = (attRows || []).filter((a) => a.status === 'tardy').length
@@ -2153,6 +2162,7 @@ function Attendance({ myTeacherId }) {
       ['absent_2', absentCount >= 2, 'absent', 2],
       ['absent_3', absentCount >= 3, 'absent', 3],
     ]
+    let sent = 0, failed = 0
     for (const [alertType, hitThreshold, word, n] of checks) {
       if (!hitThreshold) continue
       const { error: lockErr } = await supabase.from('attendance_alerts_sent').insert({ student_id: r.student_id, alert_type: alertType, period_start: period.start })
@@ -2180,8 +2190,27 @@ function Attendance({ myTeacherId }) {
         '', 'Grace and Peace,', 'Corrie / Shine Dance Studio',
       ].filter(Boolean).join('\n')
       const recipients = [r.parentEmail, 'shineGHFC@gmail.com'].filter(Boolean)
-      if (recipients.length) await sendFromShine({ subject, message, emails: recipients })
+      if (recipients.length) {
+        const result = await sendFromShine({ subject, message, emails: recipients })
+        if (!result.ok) {
+          // THE FIX: this used to just `await sendFromShine(...)` and never
+          // look at the result. The lock row above gets inserted BEFORE the
+          // send is even attempted — so if the send itself fails (expired
+          // login session, a Gmail issue, anything), the alert is already
+          // permanently marked as sent in the database, even though nothing
+          // actually went out. Not even "Check all students against this
+          // period" would retry it, since the lock already exists. Rolling
+          // the lock back on a real send failure means it can be retried
+          // instead of silently disappearing forever.
+          console.error(`Attendance alert: send actually failed for "${alertType}" (student ${r.student_id}) — ${result.error}. Removing the lock so this can be retried.`)
+          await supabase.from('attendance_alerts_sent').delete().eq('student_id', r.student_id).eq('alert_type', alertType).eq('period_start', period.start)
+          failed++
+        } else {
+          sent++
+        }
+      }
     }
+    return { sent, failed }
   }
 
   async function save() {
