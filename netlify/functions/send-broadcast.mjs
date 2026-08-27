@@ -39,15 +39,23 @@ export const handler = async (event) => {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
   if (!token) return json(401, { ok: false, error: 'Not signed in' })
 
-  if (supabaseUrl && supabaseAnonKey) {
-    try {
-      const check = await fetch(`${supabaseUrl}/auth/v1/user`, {
-        headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${token}` },
-      })
-      if (!check.ok) return json(401, { ok: false, error: 'Sign-in expired, refresh and try again' })
-    } catch {
-      return json(500, { ok: false, error: 'Could not verify sign-in' })
-    }
+  // THE FIX (restored — this had regressed back to the original bug): this
+  // must NOT only run when supabaseUrl/supabaseAnonKey are both present.
+  // If either was missing, the whole verification block used to be skipped
+  // entirely, and ANY non-empty Bearer token would pass — meaning anyone
+  // who found this URL could use the church's Gmail with zero valid
+  // credentials. Missing config now fails closed, matching the Gmail-
+  // config check above, instead of silently granting access.
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return json(500, { ok: false, error: 'Auth verification not configured (missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY)' })
+  }
+  try {
+    const check = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${token}` },
+    })
+    if (!check.ok) return json(401, { ok: false, error: 'Sign-in expired, refresh and try again' })
+  } catch {
+    return json(500, { ok: false, error: 'Could not verify sign-in' })
   }
 
   // --- Read the message -------------------------------------------------
