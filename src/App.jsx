@@ -3744,29 +3744,38 @@ function InterestList() {
 }
 
 const NAV = [
-  { key: 'dashboard', label: 'Dashboard' },
-  { key: 'enrollments', label: 'Enrollments' },
-  { key: 'attendance', label: 'Attendance' },
-  { key: 'my-classes', label: 'My Classes' },
-  { key: 'classes', label: 'Classes' },
-  { key: 'rooms', label: 'Rooms' },
-  { key: 'students', label: 'Students' },
-  { key: 'needs-class', label: 'Needs a Class' },
-  { key: 'families', label: 'Families' },
-  { key: 'teachers', label: 'Teachers' },
-  { key: 'teacher-access', label: 'Teacher Access' },
-  { key: 'photos', label: 'Photos' },
-  { key: 'team', label: 'Our Team' },
-  { key: 'testimonials', label: 'Testimonials' },
-  { key: 'announcements', label: 'Announcements' },
-  { key: 'policies', label: 'Policies & Forms' },
-  { key: 'site-content', label: 'Site Content' },
-  { key: 'privacy', label: 'Privacy Settings' },
-  { key: 'season', label: 'New Season' },
-  { key: 'registrations', label: 'Registrations' },
-  { key: 'parent-meetings', label: 'Parent Meetings' },
-  { key: 'volunteers', label: 'Volunteers' },
-  { key: 'interest', label: 'Interest List' },
+  { key: 'dashboard', label: 'Dashboard' }, // ungrouped, always pinned at top
+  { key: 'enrollments', label: 'Enrollments', group: 'classes' },
+  { key: 'attendance', label: 'Attendance', group: 'classes' },
+  { key: 'my-classes', label: 'My Classes', group: 'classes' },
+  { key: 'classes', label: 'Classes', group: 'classes' },
+  { key: 'rooms', label: 'Rooms', group: 'classes' },
+  { key: 'season', label: 'New Season', group: 'classes' },
+  { key: 'students', label: 'Students', group: 'people' },
+  { key: 'needs-class', label: 'Needs a Class', group: 'people' },
+  { key: 'families', label: 'Families', group: 'people' },
+  { key: 'teachers', label: 'Teachers', group: 'people' },
+  { key: 'volunteers', label: 'Volunteers', group: 'people' },
+  { key: 'registrations', label: 'Registrations', group: 'registration' },
+  { key: 'parent-meetings', label: 'Parent Meetings', group: 'registration' },
+  { key: 'interest', label: 'Interest List', group: 'registration' },
+  { key: 'photos', label: 'Photos', group: 'website' },
+  { key: 'team', label: 'Our Team', group: 'website' },
+  { key: 'testimonials', label: 'Testimonials', group: 'website' },
+  { key: 'announcements', label: 'Announcements', group: 'website' },
+  { key: 'policies', label: 'Policies & Forms', group: 'website' },
+  { key: 'site-content', label: 'Site Content', group: 'website' },
+  { key: 'teacher-access', label: 'Teacher Access', group: 'admin' },
+  { key: 'privacy', label: 'Privacy Settings', group: 'admin' },
+]
+
+// Order here is the order groups render in the sidebar.
+const NAV_GROUPS = [
+  { key: 'classes', label: 'Classes & Rosters' },
+  { key: 'people', label: 'People' },
+  { key: 'registration', label: 'Registration' },
+  { key: 'website', label: 'Public Website' },
+  { key: 'admin', label: 'Admin' },
 ]
 
 // Hard safelist: no matter what Corrie checks in Teacher Access, a teacher
@@ -3778,6 +3787,28 @@ const TEACHER_MAX_GRANTABLE = ['attendance', 'my-classes', 'classes', 'enrollmen
 export default function App() {
   const [session, setSession] = useState(undefined)
   const [page, setPage] = useState('dashboard')
+  // Which sidebar groups are expanded. Only the group containing the
+  // current page starts open, so the sidebar opens simple and short —
+  // that's the actual point of grouping these 20+ screens in the first
+  // place. Switching pages (including via Dashboard's own quick links)
+  // auto-expands that page's group so the active item is never hidden
+  // behind a collapsed section.
+  const [openGroups, setOpenGroups] = useState(() => {
+    const initial = NAV.find((n) => n.key === 'dashboard')
+    return new Set([initial?.group].filter(Boolean))
+  })
+  function goToPage(key) {
+    const group = NAV.find((n) => n.key === key)?.group
+    if (group) setOpenGroups((prev) => new Set(prev).add(group))
+    setPage(key)
+  }
+  function toggleGroup(key) {
+    setOpenGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
   const [newRegCount, setNewRegCount] = useState(0)
   const [isTeacher, setIsTeacher] = useState(false)
   const [myTeacherId, setMyTeacherId] = useState(null)
@@ -3844,24 +3875,55 @@ export default function App() {
   if (!roleLoaded) return <div className="loading">Loading…</div>
   const visibleNav = isTeacher ? NAV.filter((n) => allowedScreens.includes(n.key)) : NAV.filter((n) => n.key !== 'my-classes')
   const safePage = isTeacher && !allowedScreens.includes(page) ? (allowedScreens[0] || 'attendance') : page
+  const dashboardEntry = visibleNav.find((n) => n.key === 'dashboard')
   return (
     <div className="app">
       <nav className="sidebar">
         <div className="brand">Shine<small>{isTeacher ? 'Teacher' : 'Dance Studio'}</small></div>
-        {visibleNav.map((n) => (
-          <button key={n.key} className={`navlink ${safePage === n.key ? 'active' : ''}`} onClick={() => setPage(n.key)}>
-            {n.label}
-            {n.key === 'registrations' && newRegCount > 0 && <span className="badge">{newRegCount}</span>}
-          </button>
-        ))}
+        {/* Teachers only ever see a couple of screens (Attendance, My
+            Classes) — grouping that would just add clicks for no benefit,
+            so they keep the original flat list. Grouping is specifically
+            for the admin view, which is the one that grew past 20 items. */}
+        {isTeacher ? (
+          visibleNav.map((n) => (
+            <button key={n.key} className={`navlink ${safePage === n.key ? 'active' : ''}`} onClick={() => setPage(n.key)}>
+              {n.label}
+            </button>
+          ))
+        ) : (
+          <>
+            {dashboardEntry && (
+              <button className={`navlink ${safePage === 'dashboard' ? 'active' : ''}`} onClick={() => goToPage('dashboard')}>{dashboardEntry.label}</button>
+            )}
+            {NAV_GROUPS.map((g) => {
+              const items = visibleNav.filter((n) => n.group === g.key)
+              if (!items.length) return null
+              const isOpen = openGroups.has(g.key)
+              return (
+                <div key={g.key} className="nav-group">
+                  <button className="nav-group-head" onClick={() => toggleGroup(g.key)}>
+                    <span>{g.label}</span>
+                    <span className={`nav-group-caret ${isOpen ? 'open' : ''}`}>▸</span>
+                  </button>
+                  {isOpen && items.map((n) => (
+                    <button key={n.key} className={`navlink navlink-sub ${safePage === n.key ? 'active' : ''}`} onClick={() => goToPage(n.key)}>
+                      {n.label}
+                      {n.key === 'registrations' && newRegCount > 0 && <span className="badge">{newRegCount}</span>}
+                    </button>
+                  ))}
+                </div>
+              )
+            })}
+          </>
+        )}
         <button className="navlink signout" onClick={() => supabase.auth.signOut()}>Sign out</button>
       </nav>
       <main className="main">
-        {safePage === 'dashboard' && !isTeacher && <Dashboard go={setPage} />}
+        {safePage === 'dashboard' && !isTeacher && <Dashboard go={goToPage} />}
         {safePage === 'enrollments' && <Enrollments initialClassFilter={jumpClassId} onConsumeInitialFilter={() => setJumpClassId('')} />}
         {safePage === 'attendance' && <Attendance myTeacherId={isTeacher ? myTeacherId : null} />}
         {safePage === 'my-classes' && <MyClasses myTeacherId={myTeacherId} />}
-        {safePage === 'classes' && <Classes onOpenRoster={(id) => { setJumpClassId(id); setPage('enrollments') }} />}
+        {safePage === 'classes' && <Classes onOpenRoster={(id) => { setJumpClassId(id); goToPage('enrollments') }} />}
         {safePage === 'students' && <Students />}
         {safePage === 'needs-class' && !isTeacher && <Students needsClassOnly />}
         {safePage === 'families' && !isTeacher && <Families />}
