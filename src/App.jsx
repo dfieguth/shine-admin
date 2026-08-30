@@ -2279,7 +2279,7 @@ function Attendance({ myTeacherId }) {
   const presentCount = roster ? roster.filter((r) => r.status === 'present' || r.status === 'tardy').length : 0
   const statusLabel = { present: '✓ Present', tardy: 'T Tardy', absent: '○ Absent', '': 'Tap to mark' }
   const statusPill = { present: 'enrolled', tardy: 'waitlist', absent: 'dropped', '': 'inactive' }
-  const [tab, setTab] = useState('mark') // 'mark' | 'history'
+  const [tab, setTab] = useState('mark') // 'mark' | 'history' | 'print'
   // Opens a specific saved sheet from History back in the Mark tab. The
   // date is already known-valid (it came from a real saved record), so
   // this bypasses switchDate's day-of-week validation on purpose.
@@ -2295,9 +2295,12 @@ function Attendance({ myTeacherId }) {
       <div className="view-toggle" style={{ marginBottom: 16 }}>
         <button className={tab === 'mark' ? 'active' : ''} onClick={() => setTab('mark')}>Mark Attendance</button>
         <button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Search Saved Sheets</button>
+        <button className={tab === 'print' ? 'active' : ''} onClick={() => setTab('print')}>Print Monthly Roster</button>
       </div>
       {tab === 'history' ? (
         <AttendanceHistory myTeacherId={myTeacherId} onOpen={openSheet} />
+      ) : tab === 'print' ? (
+        <MonthlyRosterPrint classes={classes} myTeacherId={myTeacherId} />
       ) : (
       <>
       {!myTeacherId && (
@@ -2482,6 +2485,132 @@ function AttendanceHistory({ myTeacherId, onOpen }) {
             ))}
           </tbody>
         </table></div>
+      )}
+    </>
+  )
+}
+
+const STATUS_SYMBOL = { present: '✓', absent: '✗', tardy: '–' } // tardy as a dash for now, per Corrie's placeholder pending her actual preference
+
+// A clean, printable monthly roster grid — student names down the left,
+// one column per date the selected class(es) actually met that month, a
+// symbol in each cell. Built as a genuinely separate thing from the
+// Search Saved Sheets list/print above: that one prints a LIST of sheets;
+// this prints a single GRID meant to be handed out or posted, matching
+// what a teacher would actually want on paper.
+//
+// Lets you select MORE THAN ONE class on purpose. A class that meets
+// twice a week (e.g. Monday and Wednesday) is stored as two separate
+// class records, not one — there's no single-day-of-week field that
+// covers both. Selecting both records here combines them onto one sheet,
+// which is the practical way to get a "Monday/Wednesday" roster without
+// changing how classes are stored.
+function MonthlyRosterPrint({ classes, myTeacherId }) {
+  const [selected, setSelected] = useState(new Set())
+  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7)) // YYYY-MM
+  const [report, setReport] = useState(null) // { dates: [...], students: [{name, marks: {date: status}}] }
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+
+  function toggleClass(id) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+    setReport(null) // selection changed — old report no longer matches, force a fresh Generate
+  }
+
+  async function generate() {
+    if (!selected.size) { setErr('Pick at least one class.'); return }
+    setErr(''); setLoading(true); setReport(null)
+    const classIds = [...selected]
+    const [y, m] = month.split('-').map(Number)
+    const monthStart = `${month}-01`
+    const monthEnd = new Date(y, m, 0).toISOString().slice(0, 10) // last real day of that month
+
+    const { data: enrData, error: enrErr } = await supabase.from('enrollments').select('id, class_id, students(id, first_name, last_name)').in('class_id', classIds).eq('status', 'enrolled')
+    if (enrErr) { console.error('MonthlyRosterPrint: loading enrollments failed —', enrErr); setErr(enrErr.message); setLoading(false); return }
+    const enrToStudent = {}
+    const studentNames = {}
+    for (const e of enrData || []) {
+      if (!e.students) continue
+      enrToStudent[e.id] = e.students.id
+      studentNames[e.students.id] = `${e.students.first_name} ${e.students.last_name}`
+    }
+    const enrIds = Object.keys(enrToStudent)
+    if (!enrIds.length) { setReport({ dates: [], students: [] }); setLoading(false); return }
+
+    const { data: attData, error: attErr } = await supabase.from('attendance').select('class_date, status, enrollment_id').in('enrollment_id', enrIds).gte('class_date', monthStart).lte('class_date', monthEnd)
+    if (attErr) { console.error('MonthlyRosterPrint: loading attendance failed —', attErr); setErr(attErr.message); setLoading(false); return }
+
+    const dateSet = new Set()
+    const marksByStudent = {} // student_id -> { date: status }
+    for (const a of attData || []) {
+      const sid = enrToStudent[a.enrollment_id]
+      if (!sid) continue
+      dateSet.add(a.class_date)
+      if (!marksByStudent[sid]) marksByStudent[sid] = {}
+      marksByStudent[sid][a.class_date] = a.status
+    }
+    const dates = [...dateSet].sort()
+    const students = Object.keys(studentNames)
+      .map((sid) => ({ id: sid, name: studentNames[sid], marks: marksByStudent[sid] || {} }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    setReport({ dates, students })
+    setLoading(false)
+  }
+
+  const [ry, rm] = month.split('-').map(Number)
+  const monthLabel = new Date(ry, rm - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+  const selectedNames = classes.filter((c) => selected.has(c.id)).map((c) => c.name).join(' + ')
+
+  return (
+    <>
+      <div className="toolbar">
+        <input type="month" value={month} onChange={(e) => { setMonth(e.target.value); setReport(null) }} />
+        <button className="btn" onClick={generate} disabled={loading}>{loading ? 'Building…' : 'Generate'}</button>
+        {report && <button className="btn ghost" onClick={() => window.print()}>Print</button>}
+      </div>
+      <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>Select one or more classes — pick more than one to combine a class that meets on two different days (e.g. Monday and Wednesday) onto a single sheet.</p>
+      <div className="class-check-list" style={{ marginBottom: 16 }}>
+        {classes.map((c) => (
+          <label key={c.id} className="class-check-row">
+            <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleClass(c.id)} />
+            <span>{c.name} <span style={{ color: 'var(--ink-soft)' }}>({c.day_of_week})</span></span>
+          </label>
+        ))}
+      </div>
+      {err && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{err}</div>}
+      {report && (
+        report.dates.length === 0 ? (
+          <div className="card"><div className="empty"><h3>No saved attendance for this month</h3><p>Nothing's been marked yet for {monthLabel} on the selected class(es).</p></div></div>
+        ) : (
+          <div className="print-sheet" style={{ background: '#fff', border: '1px solid var(--line)', borderRadius: 8, padding: 16, overflowX: 'auto' }}>
+            <h2>{monthLabel} — {selectedNames}</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>Student</th>
+                  {report.dates.map((d) => <th key={d}>{new Date(d + 'T00:00').toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {report.students.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.name}</td>
+                    {report.dates.map((d) => <td key={d}>{STATUS_SYMBOL[s.marks[d]] || ''}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="print-legend">✓ Present &nbsp; ✗ Absent &nbsp; – Tardy</p>
+          </div>
+        )
+      )}
+      {report && report.dates.length > 0 && (
+        <p className="print-only-note">Click Print above — the sheet above is what actually prints; everything else on this page (nav, buttons, this note) is hidden automatically.</p>
       )}
     </>
   )

@@ -200,3 +200,24 @@ textarea { resize: vertical; min-height: 60px; }
 .class-check-row{display:flex;gap:10px;align-items:flex-start;padding:9px;font-size:14px;cursor:pointer;border-radius:6px}
 .class-check-row:hover{background:var(--sand)}
 .class-check-row input{width:auto;flex-shrink:0;margin-top:3px}
+
+/* Print cleanup — this admin app was never designed for printing (it's a
+   screen-first tool), so a plain browser print previously included the
+   navy sidebar, every nav link, and full-width dark backgrounds meant for
+   a screen, not paper. This hides everything except the actual content
+   being printed, and gives anything marked .print-sheet a clean, simple
+   look on paper regardless of how it's styled on screen. */
+@media print {
+  .sidebar, .toolbar, .page-head button, .view-toggle, .btn, button { display: none !important; }
+  .main { margin: 0 !important; padding: 0 !important; }
+  body { background: #fff !important; }
+  .print-sheet { display: block !important; }
+  .print-sheet table { width: 100%; border-collapse: collapse; }
+  .print-sheet th, .print-sheet td { border: 1px solid #999; padding: 4px 6px; font-size: 11px; text-align: center; }
+  .print-sheet th:first-child, .print-sheet td:first-child { text-align: left; white-space: nowrap; }
+  .print-sheet h2 { margin: 0 0 4px; font-size: 18px; }
+  .print-sheet .print-legend { font-size: 11px; margin-top: 10px; color: #333; }
+  @page { margin: 0.5in; }
+}
+/* On screen, keep anything marked print-only out of the way until printed */
+.print-only-note { font-size: 12.5px; color: var(--ink-soft); margin-top: 10px; }
