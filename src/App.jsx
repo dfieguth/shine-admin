@@ -37,6 +37,31 @@ async function sendFromShine({ subject, message, emails }) {
   }
 }
 
+// Sets a staff login's password directly, bypassing Supabase's email-link
+// reset flow entirely. Built after that flow failed in practice — a reset
+// link opened by Gmail's own background link-scanning before the real
+// person clicked it, burning the single-use token in about two minutes.
+// This has no link, no token, no expiration to race against.
+async function resetStaffPassword({ userId, newPassword }) {
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session?.access_token) return { ok: false, error: 'Not signed in' }
+    const res = await fetch('/.netlify/functions/reset-staff-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ user_id: userId, new_password: newPassword }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || data?.ok === false) return { ok: false, error: data?.error || `HTTP ${res.status}` }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) }
+  }
+}
+
 function Modal({ title, onClose, children, onSave, saving, saveLabel = 'Save' }) {
   return (
     <div className="overlay" onClick={onClose}>
@@ -2506,30 +2531,20 @@ const STATUS_SYMBOL = { present: '✓', absent: '✗', tardy: '–' } // tardy a
 // which is the practical way to get a "Monday/Wednesday" roster without
 // changing how classes are stored.
 function MonthlyRosterPrint({ classes, myTeacherId }) {
-  const [selected, setSelected] = useState(new Set())
+  const [classId, setClassId] = useState('')
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7)) // YYYY-MM
   const [report, setReport] = useState(null) // { dates: [...], students: [{name, marks: {date: status}}] }
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
 
-  function toggleClass(id) {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id); else next.add(id)
-      return next
-    })
-    setReport(null) // selection changed — old report no longer matches, force a fresh Generate
-  }
-
   async function generate() {
-    if (!selected.size) { setErr('Pick at least one class.'); return }
+    if (!classId) { setErr('Pick a class.'); return }
     setErr(''); setLoading(true); setReport(null)
-    const classIds = [...selected]
     const [y, m] = month.split('-').map(Number)
     const monthStart = `${month}-01`
     const monthEnd = new Date(y, m, 0).toISOString().slice(0, 10) // last real day of that month
 
-    const { data: enrData, error: enrErr } = await supabase.from('enrollments').select('id, class_id, students(id, first_name, last_name)').in('class_id', classIds).eq('status', 'enrolled')
+    const { data: enrData, error: enrErr } = await supabase.from('enrollments').select('id, class_id, students(id, first_name, last_name)').eq('class_id', classId).eq('status', 'enrolled')
     if (enrErr) { console.error('MonthlyRosterPrint: loading enrollments failed —', enrErr); setErr(enrErr.message); setLoading(false); return }
     const enrToStudent = {}
     const studentNames = {}
@@ -2564,31 +2579,26 @@ function MonthlyRosterPrint({ classes, myTeacherId }) {
 
   const [ry, rm] = month.split('-').map(Number)
   const monthLabel = new Date(ry, rm - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
-  const selectedNames = classes.filter((c) => selected.has(c.id)).map((c) => c.name).join(' + ')
+  const selectedName = classes.find((c) => c.id === classId)?.name || ''
 
   return (
     <>
       <div className="toolbar">
+        <select value={classId} onChange={(e) => { setClassId(e.target.value); setReport(null) }}>
+          <option value="">Select a class…</option>
+          {classes.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.day_of_week})</option>)}
+        </select>
         <input type="month" value={month} onChange={(e) => { setMonth(e.target.value); setReport(null) }} />
         <button className="btn" onClick={generate} disabled={loading}>{loading ? 'Building…' : 'Generate'}</button>
         {report && <button className="btn ghost" onClick={() => window.print()}>Print</button>}
       </div>
-      <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>Select one or more classes — pick more than one to combine a class that meets on two different days (e.g. Monday and Wednesday) onto a single sheet.</p>
-      <div className="class-check-list" style={{ marginBottom: 16 }}>
-        {classes.map((c) => (
-          <label key={c.id} className="class-check-row">
-            <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleClass(c.id)} />
-            <span>{c.name} <span style={{ color: 'var(--ink-soft)' }}>({c.day_of_week})</span></span>
-          </label>
-        ))}
-      </div>
       {err && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{err}</div>}
       {report && (
         report.dates.length === 0 ? (
-          <div className="card"><div className="empty"><h3>No saved attendance for this month</h3><p>Nothing's been marked yet for {monthLabel} on the selected class(es).</p></div></div>
+          <div className="card"><div className="empty"><h3>No saved attendance for this month</h3><p>Nothing's been marked yet for {monthLabel} on {selectedName}.</p></div></div>
         ) : (
           <div className="print-sheet" style={{ background: '#fff', border: '1px solid var(--line)', borderRadius: 8, padding: 16, overflowX: 'auto' }}>
-            <h2>{monthLabel} — {selectedNames}</h2>
+            <h2>{monthLabel} — {selectedName}</h2>
             <table>
               <thead>
                 <tr>
@@ -3146,6 +3156,11 @@ function TeacherAccess() {
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState('')
+  const [resetting, setResetting] = useState(null) // the row being reset
+  const [newPw, setNewPw] = useState('')
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetErr, setResetErr] = useState('')
+  const [resetDone, setResetDone] = useState(false)
   const load = useCallback(async () => {
     const [sr, t] = await Promise.all([
       supabase.from('staff_roles').select('*, teachers(name)').order('created_at'),
@@ -3154,6 +3169,18 @@ function TeacherAccess() {
     setRows(sr.data || []); setTeachers(t.data || [])
   }, [])
   useEffect(() => { load() }, [load])
+
+  function openReset(r) {
+    setResetting(r); setNewPw(''); setResetErr(''); setResetDone(false)
+  }
+  async function doReset() {
+    if (newPw.length < 8) { setResetErr('Password needs to be at least 8 characters.'); return }
+    setResetBusy(true); setResetErr('')
+    const result = await resetStaffPassword({ userId: resetting.user_id, newPassword: newPw })
+    setResetBusy(false)
+    if (!result.ok) { setResetErr(`Couldn't reset: ${result.error}`); return }
+    setResetDone(true)
+  }
 
   async function save() {
     setSaveErr('')
@@ -3209,6 +3236,7 @@ function TeacherAccess() {
               <td data-label="Can see" style={{ fontSize: 13 }}>{(r.allowed_screens || []).join(', ') || '—'}</td>
               <td><div className="row-actions">
                 <button className="btn ghost small" onClick={() => setEdit({ ...r, isNew: false, allowed_screens: r.allowed_screens || [] })}>Edit</button>
+                <button className="btn ghost small" onClick={() => openReset(r)}>Reset password</button>
                 <button className="btn danger small" onClick={() => remove(r.user_id)}>Remove</button>
               </div></td>
             </tr>
@@ -3237,7 +3265,7 @@ function TeacherAccess() {
             <Field label="Linked teacher profile" value={edit.teacher_id || ''} options={[{ value: '', label: '— none —' }, ...teachers.map((t) => ({ value: t.id, label: t.name }))]} onChange={(e) => setEdit({ ...edit, teacher_id: e.target.value })} />
           </div>
           {edit.role === 'admin' ? (
-            <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', background: 'var(--cream)', padding: 10, borderRadius: 8 }}>Admin role sees everything — screen selections below don't apply.</p>
+            <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', background: 'var(--sand)', padding: 10, borderRadius: 8 }}>Admin role sees everything — screen selections below don't apply.</p>
           ) : (
             <>
               <p style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Screens this teacher can see:</p>
@@ -3247,6 +3275,27 @@ function TeacherAccess() {
                   <span><span style={{ fontWeight: 500 }}>{s.label}</span><br /><span style={{ fontSize: 12.5, color: 'var(--ink-soft)' }}>{s.note}</span></span>
                 </label>
               ))}
+            </>
+          )}
+        </Modal>
+      )}
+      {resetting && (
+        <Modal
+          title={`Reset password — ${resetting.display_name || resetting.email || 'this login'}`}
+          onClose={() => setResetting(null)}
+          onSave={resetDone ? () => setResetting(null) : doReset}
+          saving={resetBusy}
+          saveLabel={resetDone ? 'Done' : (resetBusy ? 'Setting…' : 'Set new password')}
+        >
+          {resetDone ? (
+            <p style={{ fontSize: 14.5 }}>Password set. Tell them the new password directly (text, call, in person) — this sets it immediately, no email, no link, nothing to expire.</p>
+          ) : (
+            <>
+              <p style={{ fontSize: 13.5, color: 'var(--ink-soft)', marginBottom: 14 }}>
+                Sets this login's password immediately — no reset email, no link. Built after Supabase's email reset link failed in practice (Gmail's own link-scanning opened it before the real click, expiring the token in about two minutes). Share the new password with them directly however's easiest.
+              </p>
+              {resetErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{resetErr}</div>}
+              <Field label="New password (8+ characters)" value={newPw} onChange={(e) => setNewPw(e.target.value)} type="text" placeholder="Type a new password" />
             </>
           )}
         </Modal>
