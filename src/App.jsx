@@ -1754,14 +1754,35 @@ function SiteContent() {
 // section — kept small and single-purpose for now on purpose.
 function ParentMeetings() {
   const [rows, setRows] = useState(null)
+  // These labels are the SAME live source the registration form and the
+  // confirmation email already read from (Admin -> Site Content). Reading
+  // them here too — instead of hardcoding "Fri, Aug 28" the way this
+  // screen used to — is what makes this screen automatically correct
+  // whenever Corrie updates meeting dates for a future season. No code
+  // change needed on this end when that happens.
+  const [labels, setLabels] = useState({
+    meeting_aug28_label: 'Friday, August 28th, 6:00–7:00pm (Lindley Hall)',
+    meeting_sep3_label: 'Wednesday, September 2nd, 7:00–8:00pm (Joy Hall)',
+  })
+  const [filter, setFilter] = useState('all') // 'all' | 'aug28' | 'sep3'
   const sort = useSort('date')
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from('registrations')
-        .select('id, parent_name, student_name, email, phone, meeting_aug28, meeting_sep3')
-        .or('meeting_aug28.eq.true,meeting_sep3.eq.true')
-        .order('submitted_date', { ascending: false })
-      setRows(data || [])
+      const [reg, sc] = await Promise.all([
+        supabase.from('registrations')
+          .select('id, parent_name, student_name, email, phone, meeting_aug28, meeting_sep3')
+          .or('meeting_aug28.eq.true,meeting_sep3.eq.true')
+          .order('submitted_date', { ascending: false }),
+        supabase.from('site_content').select('key, value').in('key', ['meeting_aug28_label', 'meeting_sep3_label']),
+      ])
+      setRows(reg.data || [])
+      if (sc.data?.length) {
+        setLabels((prev) => {
+          const merged = { ...prev }
+          for (const row of sc.data) if (row.value) merged[row.key] = row.value
+          return merged
+        })
+      }
     })()
   }, [])
   if (!rows) return <div className="loading">Loading…</div>
@@ -1769,23 +1790,33 @@ function ParentMeetings() {
   // appears once under each date, since that's genuinely two RSVPs.
   const attendees = []
   for (const r of rows) {
-    if (r.meeting_aug28) attendees.push({ ...r, dateLabel: 'Fri, Aug 28', dateSort: 1 })
-    if (r.meeting_sep3) attendees.push({ ...r, dateLabel: 'Wed, Sep 2', dateSort: 2 })
+    if (r.meeting_aug28) attendees.push({ ...r, dateLabel: labels.meeting_aug28_label, meetingKey: 'aug28', dateSort: 1 })
+    if (r.meeting_sep3) attendees.push({ ...r, dateLabel: labels.meeting_sep3_label, meetingKey: 'sep3', dateSort: 2 })
   }
-  const sorted = applySort(attendees, sort, {
+  const filtered = filter === 'all' ? attendees : attendees.filter((a) => a.meetingKey === filter)
+  const sorted = applySort(filtered, sort, {
     date: (a) => a.dateSort,
     parent: (a) => a.parent_name?.toLowerCase(),
     student: (a) => a.student_name?.toLowerCase(),
   })
-  const countAug28 = attendees.filter((a) => a.dateSort === 1).length
-  const countSep2 = attendees.filter((a) => a.dateSort === 2).length
+  const countAug28 = attendees.filter((a) => a.meetingKey === 'aug28').length
+  const countSep2 = attendees.filter((a) => a.meetingKey === 'sep3').length
+  const emails = [...new Set(filtered.map((a) => a.email).filter(Boolean))]
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Parent Meetings</h1>
-          <p>Who's coming to each Mandatory Parent Meeting, pulled straight from registrations. {countAug28} for Aug 28 · {countSep2} for Sep 2.</p>
+          <p>Who's coming to each Mandatory Parent Meeting, pulled straight from registrations. {countAug28} for the first meeting · {countSep2} for the second.</p>
         </div>
+      </div>
+      <div className="toolbar">
+        <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="all">Both meetings</option>
+          <option value="aug28">{labels.meeting_aug28_label}</option>
+          <option value="sep3">{labels.meeting_sep3_label}</option>
+        </select>
+        {filter !== 'all' && <EmailGroupButton emails={emails} label={filter === 'aug28' ? 'parents attending the first meeting' : 'parents attending the second meeting'} />}
       </div>
       {sorted.length === 0 ? (
         <div className="card"><div className="empty"><h3>No RSVPs yet</h3><p>Meeting selections from registration will show up here.</p></div></div>
