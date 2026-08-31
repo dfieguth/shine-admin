@@ -1686,6 +1686,9 @@ const SITE_CONTENT_FIELDS = [
   { key: 'not_sure_label', label: '"I\'m not sure" checkbox text', where: 'Registration form' },
   { key: 'meeting_aug28_label', label: 'First parent meeting — date, time, room', where: 'Registration form + confirmation email', textarea: true },
   { key: 'meeting_sep3_label', label: 'Second parent meeting — date, time, room', where: 'Registration form + confirmation email', textarea: true },
+  { key: 'meeting_aug28_date', label: 'First meeting — actual calendar date', where: 'Meeting reminder emails', type: 'date' },
+  { key: 'meeting_sep3_date', label: 'Second meeting — actual calendar date', where: 'Meeting reminder emails', type: 'date' },
+  { key: 'parent_meeting_reminder_template', label: 'Reminder email wording (sent automatically the evening before each meeting)', where: 'Meeting reminder emails', textarea: true },
 ]
 
 function SiteContent() {
@@ -1731,14 +1734,26 @@ function SiteContent() {
         <div className="card" key={where} style={{ marginBottom: 18 }}>
           <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: 15 }}>{where}</h3>
           {fields.map((f) => (
-            <Field
-              key={f.key}
-              label={f.label}
-              textarea={f.textarea}
-              value={values[f.key] ?? ''}
-              onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
-              style={f.textarea ? { minHeight: 70 } : undefined}
-            />
+            <div key={f.key}>
+              <Field
+                label={f.label}
+                textarea={f.textarea}
+                type={f.type}
+                value={values[f.key] ?? ''}
+                onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+                style={f.textarea ? { minHeight: 70 } : undefined}
+              />
+              {f.key === 'parent_meeting_reminder_template' && (
+                <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6, marginBottom: 14 }}>
+                  Use <code>{'{{greeting}}'}</code> (fills in "Good morning" or "Good evening" automatically), <code>{'{{parent_name}}'}</code>, <code>{'{{student_name}}'}</code>, and <code>{'{{meeting_details}}'}</code> (pulls the date/time/room from the label above) — these get replaced automatically for each family.
+                </p>
+              )}
+              {(f.key === 'meeting_aug28_date' || f.key === 'meeting_sep3_date') && (
+                <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6, marginBottom: 14 }}>
+                  This is what actually triggers the reminder email the evening before — separate from the text label above, which is just what parents read. Set this whenever you set a new meeting date.
+                </p>
+              )}
+            </div>
           ))}
         </div>
       ))}
