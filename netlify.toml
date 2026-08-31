@@ -1,0 +1,16 @@
+# This project didn't need a netlify.toml until now — every other
+# function has been triggered by someone clicking something in the app,
+# not run on a timer. This file ONLY declares the new scheduled function's
+# cron schedule; it deliberately does not touch build settings (command,
+# publish directory), so whatever's already configured in the Netlify UI
+# for this site keeps working exactly as before.
+
+[functions."send-meeting-reminders"]
+  # Cron is in UTC. 1:00 AM UTC = 6:00 PM Pacific Daylight Time (the
+  # active offset for the Aug/Sept registration season this was built
+  # for). Pacific shifts to Standard Time (UTC-8) outside daylight saving
+  # months, which would move the actual local fire time to 5:00 PM instead
+  # of 6:00 PM — cron doesn't auto-adjust for that. Worth knowing if a
+  # future meeting ever falls in that part of the year; change the "1" to
+  # "2" below if the local time needs correcting back to 6:00 PM then.
+  schedule = "0 1 * * *"
