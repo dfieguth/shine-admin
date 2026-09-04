@@ -204,7 +204,7 @@ function Dashboard({ go }) {
   )
 }
 
-const BLANK_CLASS = { name: '', level: 'Beginner', day_of_week: 'Monday', start_time: '', end_time: '', location: '', capacity: '', instructor_name: '', min_age: '', max_age: '', room_id: '', teacher_id: '', class_mom: '', assistant_name: '', in_recital: false, active: true }
+const BLANK_CLASS = { name: '', level: 'Beginner', day_of_week: 'Monday', start_time: '', end_time: '', location: '', capacity: '', instructor_name: '', min_age: '', max_age: '', room_id: '', teacher_id: '', class_mom: '', assistant_name: '', ta_name: '', in_recital: false, active: true }
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 const LEVELS = ['Beginner', 'Intermediate', 'Advanced', 'All levels']
 
@@ -375,9 +375,14 @@ function Classes({ onOpenRoster }) {
             <Field label="Max age (optional)" type="number" value={edit.max_age ?? ''} onChange={(e) => setEdit({ ...edit, max_age: e.target.value })} placeholder="e.g. 9, blank = no max" />
           </div>
           <div className="field row2">
-            <Field label="Class Mom" value={edit.class_mom || ''} onChange={(e) => setEdit({ ...edit, class_mom: e.target.value })} placeholder="Parent helper for this class" />
-            <Field label="Assistant" value={edit.assistant_name || ''} onChange={(e) => setEdit({ ...edit, assistant_name: e.target.value })} placeholder="Teaching assistant" />
+            {/* Internal field names (class_mom, assistant_name) kept as-is
+                on purpose — only the labels shown to staff changed, per
+                Devin's request. Renaming the underlying columns would mean
+                a migration for zero real benefit. */}
+            <Field label="Class Helper" value={edit.class_mom || ''} onChange={(e) => setEdit({ ...edit, class_mom: e.target.value })} placeholder="Parent helper for this class" />
+            <Field label="Greeter/Lobby Host" value={edit.assistant_name || ''} onChange={(e) => setEdit({ ...edit, assistant_name: e.target.value })} placeholder="Greets families, lobby help" />
           </div>
+          <Field label="TA" value={edit.ta_name || ''} onChange={(e) => setEdit({ ...edit, ta_name: e.target.value })} placeholder="Teaching assistant" />
           <label className="check" style={{ marginTop: 4 }}>
             <input type="checkbox" checked={!!edit.in_recital} onChange={(e) => setEdit({ ...edit, in_recital: e.target.checked })} />
             <span>This class will be in the recital</span>
@@ -402,8 +407,9 @@ function Classes({ onOpenRoster }) {
               <div className="vp-row"><span>Ages</span><span>{(viewingClass.min_age || viewingClass.max_age) ? `${viewingClass.min_age || 0}${viewingClass.max_age ? `–${viewingClass.max_age}` : '+'}` : '—'}</span></div>
               <div className="vp-row"><span>Room</span><span>{viewingClass.rooms?.name || '—'}</span></div>
               <div className="vp-row"><span>Teacher</span><span>{viewingClass.teachers?.name || viewingClass.instructor_name || '—'}</span></div>
-              <div className="vp-row"><span>Assistant</span><span>{viewingClass.assistant_name || '—'}</span></div>
-              <div className="vp-row"><span>Class Mom</span><span>{viewingClass.class_mom || '—'}</span></div>
+              <div className="vp-row"><span>Greeter/Lobby Host</span><span>{viewingClass.assistant_name || '—'}</span></div>
+              <div className="vp-row"><span>Class Helper</span><span>{viewingClass.class_mom || '—'}</span></div>
+              <div className="vp-row"><span>TA</span><span>{viewingClass.ta_name || '—'}</span></div>
               <div className="vp-row"><span>Capacity</span><span>{viewingClass.capacity || 'No limit'}</span></div>
               <div className="vp-row"><span>Season</span><span>{viewingClass.season || '—'}</span></div>
               <div className="vp-row"><span>In recital</span><span>{viewingClass.in_recital ? 'Yes' : 'No'}</span></div>
@@ -842,6 +848,13 @@ function Students({ needsClassOnly = false } = {}) {
   const [busyPhoto, setBusyPhoto] = useState('')
   const [viewing, setViewing] = useState(null)
   const [enrollMap, setEnrollMap] = useState({})
+  const [enrollIdsByStudent, setEnrollIdsByStudent] = useState({})
+  const [showDupes, setShowDupes] = useState(false)
+  const [merging, setMerging] = useState(null) // { group, survivorId, survivorLabel }
+  const [mergeBusy, setMergeBusy] = useState(false)
+  const [mergeErr, setMergeErr] = useState('')
+  const [bulkPreview, setBulkPreview] = useState(false)
+  const [bulkMergeBusy, setBulkMergeBusy] = useState(false)
   const [enrolling, setEnrolling] = useState(null) // student being enrolled
   const [currentEnrollments, setCurrentEnrollments] = useState([])
   const [availableClasses, setAvailableClasses] = useState([])
@@ -852,16 +865,19 @@ function Students({ needsClassOnly = false } = {}) {
     const [s, f, enr] = await Promise.all([
       supabase.from('students').select('*, families(*)').order('last_name'),
       supabase.from('families').select('id, parent_first_name, parent_last_name').order('parent_last_name'),
-      supabase.from('enrollments').select('student_id, status, classes(name)').eq('status', 'enrolled'),
+      supabase.from('enrollments').select('id, student_id, status, classes(name)'),
     ])
     setRows(s.data || []); setFamilies(f.data || [])
     const em = {}
+    const eids = {} // student_id -> ALL their enrollment ids (any status) — used by the duplicate-merge tool below to move enrollments over, not just for display
     for (const e of enr.data || []) {
-      if (!e.classes) continue
+      (eids[e.student_id] = eids[e.student_id] || []).push(e.id)
+      if (e.status !== 'enrolled' || !e.classes) continue
       if (!em[e.student_id]) em[e.student_id] = []
       em[e.student_id].push(e.classes.name)
     }
     setEnrollMap(em)
+    setEnrollIdsByStudent(eids)
     // Student photos live in a PRIVATE bucket; signed URLs are staff-only and expire.
     const paths = (s.data || []).map((r) => r.photo_path).filter(Boolean)
     if (paths.length) {
@@ -872,6 +888,107 @@ function Students({ needsClassOnly = false } = {}) {
     } else setPhotoUrls({})
   }, [])
   useEffect(() => { load() }, [load])
+
+  // Possible-duplicate detection: same normalized first+last name — the
+  // exact scenario Devin described, where a parent logging back in to add
+  // a class re-did the whole registration instead of finding their
+  // existing one, creating a second student record. Same pattern already
+  // used for duplicate Families, adapted for students: the real risk here
+  // is different, though — a duplicate family often has nothing attached
+  // and is safe to just archive, but BOTH duplicate student records here
+  // are likely to have REAL, DIFFERENT enrollments (the original classes
+  // on one, the newly-added class on the other), so the merge needs to
+  // actually move enrollments over, not just hide an empty leftover.
+  const dupeGroups = (() => {
+    if (!rows) return []
+    const groups = {}
+    for (const s of rows) {
+      const key = `${(s.first_name || '').trim().toLowerCase()} ${(s.last_name || '').trim().toLowerCase()}`
+      if (!key.trim()) continue
+      ;(groups[key] = groups[key] || []).push(s)
+    }
+    return Object.values(groups).filter((g) => g.length > 1)
+  })()
+
+  async function runStudentMerge(group, survivorId) {
+    setMergeBusy(true); setMergeErr('')
+    const others = group.filter((s) => s.id !== survivorId)
+    const failed = []
+    for (const loser of others) {
+      const loserEnrIds = enrollIdsByStudent[loser.id] || []
+      // Only move enrollments if this student actually has any — an
+      // empty duplicate just needs to be marked inactive, nothing to move.
+      if (loserEnrIds.length) {
+        const { error: moveErr } = await supabase.from('enrollments').update({ student_id: survivorId }).in('id', loserEnrIds)
+        if (moveErr) {
+          console.error('Students merge: moving enrollments failed for', loser.id, moveErr)
+          failed.push(`${loser.first_name} ${loser.last_name}`)
+          continue // don't mark inactive if the move failed — same safety gate used for Families
+        }
+      }
+      const { error: statusErr } = await supabase.from('students').update({ season_status: 'inactive' }).eq('id', loser.id)
+      if (statusErr) {
+        console.error('Students merge: marking inactive failed for', loser.id, statusErr)
+        failed.push(`${loser.first_name} ${loser.last_name}`)
+      }
+    }
+    setMergeBusy(false)
+    if (failed.length) {
+      setMergeErr(`Enrollments were moved, but couldn't fully complete for: ${failed.join(', ')}. Nothing was lost — just re-check these records and try again.`)
+      load()
+      return
+    }
+    setMerging(null); load()
+  }
+
+  async function runBulkStudentMerge() {
+    setBulkMergeBusy(true)
+    const failed = []
+    for (const group of dupeGroups) {
+      const survivor = group.slice().sort((a, b) => new Date(b.registered_at || b.created_at || 0) - new Date(a.registered_at || a.created_at || 0))[0]
+      const others = group.filter((s) => s.id !== survivor.id)
+      for (const loser of others) {
+        const loserEnrIds = enrollIdsByStudent[loser.id] || []
+        if (loserEnrIds.length) {
+          const { error: moveErr } = await supabase.from('enrollments').update({ student_id: survivor.id }).in('id', loserEnrIds)
+          if (moveErr) { console.error('Students bulk merge: moving enrollments failed for', loser.id, moveErr); failed.push(`${loser.first_name} ${loser.last_name}`); continue }
+        }
+        const { error: statusErr } = await supabase.from('students').update({ season_status: 'inactive' }).eq('id', loser.id)
+        if (statusErr) { console.error('Students bulk merge: marking inactive failed for', loser.id, statusErr); failed.push(`${loser.first_name} ${loser.last_name}`) }
+      }
+    }
+    setBulkMergeBusy(false); setBulkPreview(false)
+    if (failed.length) alert(`Most merges completed, but these need a second look: ${failed.join(', ')}`)
+    load()
+  }
+
+  // A plain, alphabetized print list of every currently Active student —
+  // deliberately NOT a class roster (no check-boxes, no per-class
+  // grouping, no attendance columns). Same new-window print pattern
+  // already used for class rosters, for a consistent feel.
+  function printActiveList() {
+    const active = rows
+      .filter((s) => (s.season_status || 'active') === 'active')
+      .slice()
+      .sort((a, b) => `${a.last_name} ${a.first_name}`.toLowerCase().localeCompare(`${b.last_name} ${b.first_name}`.toLowerCase()))
+    const w = window.open('', '_blank')
+    w.document.write(`<!doctype html><html><head><title>Active students</title><style>
+      body{font-family:Georgia,serif;margin:28px;color:#222}
+      h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 14px}
+      table{width:100%;border-collapse:collapse;font-size:13px}
+      th,td{border:1px solid #999;padding:7px 8px;text-align:left}
+      th{background:#eee;font-size:11px} td:first-child{width:34px;text-align:center;color:#777}
+      @media print { body{margin:10mm} }
+    </style></head><body>
+      <h1>Active Students</h1>
+      <p class="sub">${active.length} student${active.length === 1 ? '' : 's'} · Printed ${new Date().toLocaleDateString()}</p>
+      <table><tr><th></th><th>Student</th><th>Grade</th><th>Family</th></tr>
+      ${active.map((s, i) => `<tr><td>${i + 1}</td><td>${s.first_name} ${s.last_name}</td><td>${s.grade || ''}</td><td>${s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : ''}</td></tr>`).join('')}
+      </table>
+    </body></html>`)
+    w.document.close(); w.focus(); w.print()
+  }
+
   const [confirmDelete, setConfirmDelete] = useState(null)
   const [deleting, setDeleting] = useState(false)
   async function openDeleteConfirm(s) {
@@ -1060,6 +1177,51 @@ function Students({ needsClassOnly = false } = {}) {
         </div>
         <button className="btn" onClick={() => setEdit({ ...BLANK_STUDENT })}>Add student</button>
       </div>
+      {!needsClassOnly && dupeGroups.length > 0 && (
+        <div className="card" style={{ marginBottom: 18, borderColor: '#e8cf9f', background: '#fdf9f0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+            <div>
+              <strong style={{ fontSize: 14.5 }}>{dupeGroups.length} possible duplicate student{dupeGroups.length > 1 ? 's' : ''} found</strong>
+              <span style={{ color: 'var(--ink-soft)', fontSize: 13, marginLeft: 6 }}>— same name appears more than once, most often from a parent registering twice to add a second class</span>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn ghost small" onClick={() => setShowDupes((s) => !s)}>{showDupes ? 'Hide' : 'Review'}</button>
+              <button className="btn small" onClick={() => setBulkPreview(true)}>Keep newest in every group</button>
+            </div>
+          </div>
+          {showDupes && (
+            <div style={{ marginTop: 16 }}>
+              {dupeGroups.map((group, gi) => (
+                <div key={gi} className="card" style={{ marginBottom: 12, background: '#fff' }}>
+                  <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>
+                    Pick which record to KEEP. Every class enrollment on the others gets moved onto the one you pick, then the others are marked Inactive (hidden from the default view, not deleted — reversible from the Inactive filter).
+                  </p>
+                  {group.slice().sort((a, b) => new Date(b.registered_at || 0) - new Date(a.registered_at || 0)).map((s) => (
+                    <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 8 }}>
+                      <div style={{ fontSize: 13.5 }}>
+                        <strong>{s.first_name} {s.last_name}</strong>
+                        <span style={{ color: 'var(--ink-soft)' }}> · Family: {s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : 'none linked'}</span>
+                        <br />
+                        <span style={{ color: 'var(--ink-soft)', fontSize: 12.5 }}>
+                          Registered {s.registered_at ? new Date(s.registered_at).toLocaleDateString() : 'unknown'} · Status: {s.season_status || 'active'} ·{' '}
+                          {(enrollMap[s.id] || []).length ? `Classes: ${enrollMap[s.id].join(', ')}` : 'No enrolled classes'}
+                        </span>
+                      </div>
+                      <button
+                        className="btn small"
+                        disabled={mergeBusy}
+                        onClick={() => setMerging({ group, survivorId: s.id, survivorLabel: `${s.first_name} ${s.last_name}` })}
+                      >
+                        Keep this one
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <div className="toolbar">
         <input placeholder="Search students…" value={q} onChange={(e) => setQ(e.target.value)} />
         {!needsClassOnly && (
@@ -1070,6 +1232,7 @@ function Students({ needsClassOnly = false } = {}) {
               <option value="all">All students</option>
             </select>
             <button className="btn ghost small" onClick={selectAllInactive}>Select all Inactive</button>
+            <button className="btn ghost small" onClick={printActiveList}>Print Active List</button>
           </>
         )}
         {selectedIds.size > 0 && (
@@ -1106,6 +1269,53 @@ function Students({ needsClassOnly = false } = {}) {
             This cannot be undone.
           </p>
           <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Family records for these students are NOT deleted — only the student records themselves.</p>
+        </Modal>
+      )}
+      {merging && (
+        <Modal
+          title="Merge these students?"
+          onClose={() => { setMerging(null); setMergeErr('') }}
+          onSave={() => runStudentMerge(merging.group, merging.survivorId)}
+          saving={mergeBusy}
+          saveLabel={mergeBusy ? 'Merging…' : `Keep "${merging.survivorLabel}"`}
+        >
+          {mergeErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{mergeErr}</div>}
+          <p style={{ fontSize: 14.5 }}>
+            Every class enrollment currently on the other record{merging.group.length > 2 ? 's' : ''} will be moved onto{' '}
+            <strong>{merging.survivorLabel}</strong>. The other record{merging.group.length > 2 ? 's' : ''} will be marked Inactive
+            (hidden from the default Students view, not deleted) — you can undo this from the Inactive filter if it turns out to be wrong.
+          </p>
+        </Modal>
+      )}
+      {bulkPreview && (
+        <Modal
+          title={`Merge all ${dupeGroups.length} duplicate group${dupeGroups.length > 1 ? 's' : ''}?`}
+          onClose={() => setBulkPreview(false)}
+          onSave={runBulkStudentMerge}
+          saving={bulkMergeBusy}
+          saveLabel={bulkMergeBusy ? 'Merging…' : `Merge all ${dupeGroups.length}`}
+        >
+          <p style={{ fontSize: 14.5, marginBottom: 12 }}>
+            In every group below, the record with the most recent "Registered" date is kept — every enrollment from the others
+            moves onto it, and the older record(s) get marked Inactive. Review before confirming:
+          </p>
+          <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+            {dupeGroups.map((group, gi) => {
+              const sorted = group.slice().sort((a, b) => new Date(b.registered_at || 0) - new Date(a.registered_at || 0))
+              const survivor = sorted[0]
+              const losers = sorted.slice(1)
+              return (
+                <div key={gi} style={{ padding: '10px 12px', borderBottom: gi < dupeGroups.length - 1 ? '1px solid var(--line)' : 'none', fontSize: 13 }}>
+                  <span style={{ color: '#2f7d5b', fontWeight: 600 }}>KEEP</span> {survivor.first_name} {survivor.last_name}
+                  {' '}({survivor.registered_at ? new Date(survivor.registered_at).toLocaleDateString() : 'unknown'})
+                  <br />
+                  <span style={{ color: 'var(--ink-soft)' }}>
+                    marks {losers.length} older record{losers.length > 1 ? 's' : ''} Inactive, after moving their enrollments over
+                  </span>
+                </div>
+              )
+            })}
+          </div>
         </Modal>
       )}
       {filtered.length === 0 ? (
@@ -1466,7 +1676,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
       ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${r.students?.grade || ''}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blank}</tr>`).join('')}
       ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + (showAge ? '<td>&nbsp;</td>' : '') + (showEmg ? '<td>&nbsp;</td>' : '') + blank + '</tr>'.repeat(2)}
       </table>
-      <p class="line">Class Mom: ______________________________</p>
+      <p class="line">Class Helper: ______________________________ &nbsp;&nbsp; Greeter/Lobby Host: ______________________________ &nbsp;&nbsp; TA: ______________________________</p>
       ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
     </body></html>`)
     w.document.close(); w.focus(); w.print()
@@ -1492,7 +1702,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
         ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${r.students?.grade || ''}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blank}</tr>`).join('')}
         ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + (showAge ? '<td>&nbsp;</td>' : '') + (showEmg ? '<td>&nbsp;</td>' : '') + blank + '</tr>'.repeat(2)}
         </table>
-        <p class="line">Class Mom: ______________________________</p>
+        <p class="line">Class Helper: ______________________________ &nbsp;&nbsp; Greeter/Lobby Host: ______________________________ &nbsp;&nbsp; TA: ______________________________</p>
         ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
       </section>`
     }).join('')
@@ -1695,6 +1905,11 @@ function SiteContent() {
   const [values, setValues] = useState(null)
   const [saving, setSaving] = useState(false)
   const [savedNote, setSavedNote] = useState('')
+  const [testMeeting, setTestMeeting] = useState('aug28')
+  const [testEmail, setTestEmail] = useState('')
+  const [testBusy, setTestBusy] = useState(false)
+  const [testErr, setTestErr] = useState('')
+  const [testResult, setTestResult] = useState(null) // { subject, body, sent }
   const load = useCallback(async () => {
     const { data } = await supabase.from('site_content').select('key, value')
     const map = {}
@@ -1702,6 +1917,32 @@ function SiteContent() {
     setValues(map)
   }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    // Pre-fills the test-send field with whoever's actually signed in —
+    // the obvious default for "send a test to myself."
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.user?.email) setTestEmail(session.user.email)
+    })()
+  }, [])
+  async function runReminderTest(send) {
+    setTestBusy(true); setTestErr(''); setTestResult(null)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) { setTestErr('Not signed in'); setTestBusy(false); return }
+      const res = await fetch('/.netlify/functions/send-test-meeting-reminder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ meeting_key: testMeeting, test_email: testEmail, send }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data?.ok === false) { setTestErr(data?.error || `HTTP ${res.status}`); setTestBusy(false); return }
+      setTestResult({ subject: data.subject, body: data.body, sent: !!data.sent })
+    } catch (e) {
+      setTestErr(String(e?.message || e))
+    }
+    setTestBusy(false)
+  }
   async function saveAll() {
     setSaving(true); setSavedNote('')
     const rows = SITE_CONTENT_FIELDS.map((f) => ({ key: f.key, value: values[f.key] ?? '', updated_at: new Date().toISOString() }))
@@ -1757,6 +1998,36 @@ function SiteContent() {
           ))}
         </div>
       ))}
+      <div className="card" style={{ marginBottom: 18, borderColor: '#e8cf9f', background: '#fdf9f0' }}>
+        <h3 style={{ marginTop: 0, marginBottom: 6, fontSize: 15 }}>Test the meeting reminder</h3>
+        <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 14 }}>
+          Uses the REAL saved label and template above, exactly like a real send would — this is what proves it's pulling the right information before anything real is at stake. Preview shows the text with no email sent; Send actually delivers a real copy to whatever address you type in. Neither option touches real parents or the real "already sent" tracking, no matter which meetings currently have registrations.
+        </p>
+        <div className="field row2">
+          <div className="field">
+            <label>Which meeting</label>
+            <select value={testMeeting} onChange={(e) => { setTestMeeting(e.target.value); setTestResult(null) }}>
+              <option value="aug28">First meeting</option>
+              <option value="sep3">Second meeting</option>
+            </select>
+          </div>
+          <Field label="Send test to (only used if you click Send)" value={testEmail} onChange={(e) => setTestEmail(e.target.value)} placeholder="you@email.com" />
+        </div>
+        {testErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{testErr}</div>}
+        <div style={{ display: 'flex', gap: 10, marginBottom: testResult ? 14 : 0 }}>
+          <button className="btn ghost small" onClick={() => runReminderTest(false)} disabled={testBusy}>{testBusy ? 'Loading…' : 'Preview only (no email sent)'}</button>
+          <button className="btn small" onClick={() => runReminderTest(true)} disabled={testBusy || !testEmail}>{testBusy ? 'Sending…' : 'Send test email to me'}</button>
+        </div>
+        {testResult && (
+          <div style={{ background: '#fff', border: '1px solid var(--line)', borderRadius: 8, padding: 14 }}>
+            {testResult.sent && <p style={{ color: '#2f7d5b', fontWeight: 600, fontSize: 13.5, marginTop: 0 }}>Sent to {testEmail} ✓ — go check that inbox.</p>}
+            <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginBottom: 4 }}>SUBJECT</p>
+            <p style={{ fontWeight: 600, marginTop: 0 }}>{testResult.subject}</p>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginBottom: 4, marginTop: 14 }}>BODY — exactly what a real parent's version would say, with their real name in place of "Test Parent" / "Test Student"</p>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: 14, margin: 0 }}>{testResult.body}</pre>
+          </div>
+        )}
+      </div>
     </>
   )
 }
