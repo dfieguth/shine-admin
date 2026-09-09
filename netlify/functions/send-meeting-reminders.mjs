@@ -27,21 +27,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import nodemailer from 'nodemailer'
-
-// Pacific-time "today" as YYYY-MM-DD — deliberately not server/UTC time.
-// This project's meetings are all Pacific; comparing dates in UTC would
-// risk an off-by-one around the actual evening this is meant to run.
-function pacificDateString(offsetDays = 0) {
-  const now = new Date(Date.now() + offsetDays * 86400000)
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)
-}
-function pacificHour() {
-  const h = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }).format(new Date()))
-  // Some environments return 24 rather than 0 for midnight with
-  // hour12:false — normalize so the morning/evening greeting check below
-  // never misbehaves in that one edge hour.
-  return h === 24 ? 0 : h
-}
+import { pacificDateString, currentGreeting, renderReminder, REMINDER_SUBJECT } from './_meeting-reminder-shared.mjs'
 
 export const handler = async () => {
   const supabaseUrl = process.env.VITE_SUPABASE_URL
@@ -62,7 +48,7 @@ export const handler = async () => {
   const admin = createClient(supabaseUrl, serviceRoleKey)
   const today = pacificDateString(0)
   const tomorrow = pacificDateString(1)
-  const greeting = pacificHour() < 12 ? 'Good morning' : 'Good evening'
+  const greeting = currentGreeting()
 
   const { data: scRows, error: scErr } = await admin.from('site_content').select('key, value').in('key', [
     'meeting_aug28_date', 'meeting_sep3_date', 'meeting_aug28_label', 'meeting_sep3_label', 'parent_meeting_reminder_template',
@@ -73,8 +59,6 @@ export const handler = async () => {
   }
   const sc = {}
   for (const row of scRows || []) sc[row.key] = row.value
-
-  const template = sc.parent_meeting_reminder_template || 'Hi {{parent_name}},\n\n{{greeting}}! This is a reminder that {{student_name}}\'s Shine parent meeting is tomorrow: {{meeting_details}}, at Granada Heights Friends Church.\n\nGrace and Peace,\nCorrie Villa'
 
   const meetings = [
     { key: 'aug28', date: sc.meeting_aug28_date, label: sc.meeting_aug28_label, flagColumn: 'meeting_aug28' },
@@ -129,17 +113,15 @@ export const handler = async () => {
     let sentCount = 0
     const failures = []
     for (const r of recipients) {
-      const body = template
-        .replaceAll('{{greeting}}', greeting)
-        .replaceAll('{{parent_name}}', r.parent_name || 'there')
-        .replaceAll('{{student_name}}', r.student_name || 'your dancer')
-        .replaceAll('{{meeting_details}}', meeting.label || 'tomorrow\'s meeting')
+      const body = renderReminder(sc.parent_meeting_reminder_template, {
+        greeting, parentName: r.parent_name, studentName: r.student_name, meetingDetails: meeting.label,
+      })
       try {
         await transporter.sendMail({
           from: `"Shine Dance Studio" <${gmailAddress}>`,
           to: r.email,
           replyTo: gmailAddress,
-          subject: 'Reminder: Shine parent meeting tomorrow',
+          subject: REMINDER_SUBJECT,
           text: body,
         })
         sentCount++
