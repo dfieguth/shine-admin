@@ -902,7 +902,14 @@ function Students({ needsClassOnly = false } = {}) {
   const dupeGroups = (() => {
     if (!rows) return []
     const groups = {}
-    for (const s of rows) {
+    // THE FIX: this used to group every student regardless of status —
+    // so after a successful merge (the loser correctly marked Inactive),
+    // that same record kept showing up in this exact same group forever,
+    // since nothing here checked status at all. It looked exactly like
+    // the merge silently did nothing, even when it had genuinely worked.
+    // Families already filters out archived records the same way; this
+    // just brings Students in line with that.
+    for (const s of rows.filter((s) => (s.season_status || 'active') === 'active')) {
       const key = `${(s.first_name || '').trim().toLowerCase()} ${(s.last_name || '').trim().toLowerCase()}`
       if (!key.trim()) continue
       ;(groups[key] = groups[key] || []).push(s)
@@ -1650,8 +1657,12 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
     const cls = classes.find((c) => c.id === filterClass)
     if (!cls) return
     const { data: priv } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
-    const enrolled = rows.filter((r) => r.class_id === filterClass && r.status === 'enrolled')
-    const waitlist = rows.filter((r) => r.class_id === filterClass && r.status === 'waitlist')
+    // Alphabetized by last name, same fix as the on-screen table and
+    // printAllRosters below — this used to just follow raw load order.
+    const byLastName = (a, b) => `${a.students?.last_name || ''} ${a.students?.first_name || ''}`.trim().toLowerCase()
+      .localeCompare(`${b.students?.last_name || ''} ${b.students?.first_name || ''}`.trim().toLowerCase())
+    const enrolled = rows.filter((r) => r.class_id === filterClass && r.status === 'enrolled').slice().sort(byLastName)
+    const waitlist = rows.filter((r) => r.class_id === filterClass && r.status === 'waitlist').slice().sort(byLastName)
     const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
     const dateCols = 8
     const blank = '<td>&nbsp;</td>'.repeat(dateCols)
@@ -1688,9 +1699,11 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
     const dateCols = 8
     const blank = '<td>&nbsp;</td>'.repeat(dateCols)
     const activeClasses = classes.slice().sort((x, y) => (x.day_of_week || '').localeCompare(y.day_of_week || ''))
+    const byLastName = (a, b) => `${a.students?.last_name || ''} ${a.students?.first_name || ''}`.trim().toLowerCase()
+      .localeCompare(`${b.students?.last_name || ''} ${b.students?.first_name || ''}`.trim().toLowerCase())
     const sections = activeClasses.map((cls) => {
-      const enrolled = rows.filter((r) => r.class_id === cls.id && r.status === 'enrolled')
-      const waitlist = rows.filter((r) => r.class_id === cls.id && r.status === 'waitlist')
+      const enrolled = rows.filter((r) => r.class_id === cls.id && r.status === 'enrolled').slice().sort(byLastName)
+      const waitlist = rows.filter((r) => r.class_id === cls.id && r.status === 'waitlist').slice().sort(byLastName)
       const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
       const teacher = cls.teachers?.name || cls.instructor_name || ''
       const room = cls.rooms?.name || cls.location || ''
@@ -1726,6 +1739,14 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   const filtered = rows
     .filter((r) => filterClass ? r.class_id === filterClass : true)
     .filter((r) => statusFilter ? r.status === statusFilter : true)
+    // Alphabetized by last name — this used to just follow the raw
+    // load order (most-recently-registered first), which isn't how
+    // anyone actually wants to read a class roster.
+    .sort((a, b) => {
+      const an = `${a.students?.last_name || ''} ${a.students?.first_name || ''}`.trim().toLowerCase()
+      const bn = `${b.students?.last_name || ''} ${b.students?.first_name || ''}`.trim().toLowerCase()
+      return an.localeCompare(bn)
+    })
   return (
     <>
       <div className="page-head">
@@ -3752,6 +3773,278 @@ function SeasonRollover() {
   )
 }
 
+// ============================================================
+// Recital Tickets — a fixed-capacity, per-family-capped (max 6) ticket
+// reservation system with two phases: an initial window limited to
+// families with a dancer in an "in recital" class, then a release
+// (automatic at a deadline, or manual any time an admin chooses) that
+// opens remaining tickets to everyone. Supports two interchangeable
+// capacity modes — per show, or one combined total — since Devin wasn't
+// sure yet which fits better; switching modes just changes which number
+// the capacity check uses, nothing else about how reservations work.
+// ============================================================
+
+function RecitalTickets() {
+  const [tab, setTab] = useState('settings') // 'settings' | 'shows' | 'reservations'
+  return (
+    <>
+      <div className="page-head"><div><h1>Recital Tickets</h1><p>Shows, capacity, and who's reserved so far.</p></div></div>
+      <div className="view-toggle" style={{ marginBottom: 16 }}>
+        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}>Settings & Release</button>
+        <button className={tab === 'shows' ? 'active' : ''} onClick={() => setTab('shows')}>Shows</button>
+        <button className={tab === 'reservations' ? 'active' : ''} onClick={() => setTab('reservations')}>Reservations</button>
+      </div>
+      {tab === 'settings' && <RecitalSettingsTab />}
+      {tab === 'shows' && <RecitalShowsTab />}
+      {tab === 'reservations' && <RecitalReservationsTab />}
+    </>
+  )
+}
+
+function RecitalSettingsTab() {
+  const [settings, setSettings] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [savedNote, setSavedNote] = useState('')
+  const [releasing, setReleasing] = useState(false)
+  const load = useCallback(async () => {
+    const { data } = await supabase.from('recital_settings').select('*').eq('id', 1).maybeSingle()
+    setSettings(data || { id: 1, capacity_mode: 'per_show', combined_capacity: '', reservation_deadline: '', released: false })
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  async function save() {
+    setSaving(true); setSavedNote('')
+    const { error } = await supabase.from('recital_settings').update({
+      capacity_mode: settings.capacity_mode,
+      combined_capacity: settings.combined_capacity === '' ? null : Number(settings.combined_capacity),
+      reservation_deadline: settings.reservation_deadline || null,
+    }).eq('id', 1)
+    setSaving(false)
+    if (error) { console.error('RecitalSettings: save failed —', error); setSavedNote(`Could not save: ${error.message}`); return }
+    setSavedNote('Saved ✓'); setTimeout(() => setSavedNote((n) => n === 'Saved ✓' ? '' : n), 2500)
+  }
+  async function releaseNow() {
+    if (!confirm('Release remaining tickets to everyone now? Families outside the initial performers-only window will be able to reserve immediately after this.')) return
+    setReleasing(true)
+    const { error } = await supabase.from('recital_settings').update({ released: true, released_at: new Date().toISOString() }).eq('id', 1)
+    setReleasing(false)
+    if (error) { console.error('RecitalSettings: release failed —', error); alert(`Could not release: ${error.message}`); return }
+    load()
+  }
+  async function undoRelease() {
+    if (!confirm('Close reservations back to performers-only? Anyone who already reserved during the open window keeps their tickets — this only affects new reservations going forward.')) return
+    const { error } = await supabase.from('recital_settings').update({ released: false, released_at: null }).eq('id', 1)
+    if (error) { alert(`Could not undo: ${error.message}`); return }
+    load()
+  }
+
+  if (!settings) return <div className="loading">Loading…</div>
+  const deadlinePassed = settings.reservation_deadline && new Date(settings.reservation_deadline) <= new Date()
+
+  return (
+    <>
+      <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Status</h3>
+        {settings.released ? (
+          <div style={{ background: '#eaf6ef', border: '1px solid #bfe3cc', color: '#2f7d5b', padding: '10px 12px', borderRadius: 8, fontSize: 14 }}>
+            <strong>Open to everyone.</strong>{settings.released_at ? ` Released ${new Date(settings.released_at).toLocaleString()}.` : ''}{' '}
+            <button className="btn ghost small" style={{ marginLeft: 8 }} onClick={undoRelease}>Undo — back to performers-only</button>
+          </div>
+        ) : (
+          <div style={{ background: '#fdf9f0', border: '1px solid #e8cf9f', color: '#a3741f', padding: '10px 12px', borderRadius: 8, fontSize: 14 }}>
+            <strong>Performers-only right now</strong> — only families with a dancer in an "in recital" class can reserve.
+            {settings.reservation_deadline
+              ? ` Opens to everyone automatically on ${new Date(settings.reservation_deadline).toLocaleString()}${deadlinePassed ? ' (deadline has passed — will open on the next reservation attempt, or click below to open it immediately)' : '.'}`
+              : ' No automatic deadline set — release manually whenever you\'re ready.'}
+            <br /><button className="btn small" style={{ marginTop: 10 }} onClick={releaseNow} disabled={releasing}>{releasing ? 'Releasing…' : 'Release remaining tickets to everyone now'}</button>
+          </div>
+        )}
+      </div>
+
+      <div className="card card-pad">
+        <h3 style={{ marginTop: 0 }}>Capacity</h3>
+        <div className="field">
+          <label>Capacity mode</label>
+          <select value={settings.capacity_mode} onChange={(e) => setSettings({ ...settings, capacity_mode: e.target.value })}>
+            <option value="per_show">Per show — each show has its own separate capacity</option>
+            <option value="combined">Combined total — one shared capacity across every show</option>
+          </select>
+        </div>
+        {settings.capacity_mode === 'per_show' ? (
+          <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Set each show's own capacity on the Shows tab.</p>
+        ) : (
+          <Field label="Combined capacity (across all shows)" type="number" value={settings.combined_capacity ?? ''} onChange={(e) => setSettings({ ...settings, combined_capacity: e.target.value })} placeholder="Total seats across every show" />
+        )}
+        <Field label="Automatic release deadline (optional)" type="datetime-local" value={settings.reservation_deadline ? settings.reservation_deadline.slice(0, 16) : ''} onChange={(e) => setSettings({ ...settings, reservation_deadline: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6 }}>Leave blank if you'd rather release manually whenever you decide, instead of on a fixed schedule.</p>
+        <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
+        {savedNote && <span style={{ marginLeft: 10, fontSize: 14, color: savedNote.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)' }}>{savedNote}</span>}
+      </div>
+    </>
+  )
+}
+
+const BLANK_SHOW = { name: '', show_date: '', show_time: '', capacity: '', active: true }
+function RecitalShowsTab() {
+  const [rows, setRows] = useState(null)
+  const [counts, setCounts] = useState({})
+  const [edit, setEdit] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
+  const load = useCallback(async () => {
+    const [s, c] = await Promise.all([
+      supabase.from('recital_shows').select('*').order('sort_order').order('show_date'),
+      supabase.rpc('ticket_counts_by_show'),
+    ])
+    setRows(s.data || [])
+    const map = {}
+    for (const row of c.data || []) map[row.show_id] = Number(row.confirmed_count) || 0
+    setCounts(map)
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function save() {
+    setSaving(true); setSaveErr('')
+    const payload = { ...edit, capacity: edit.capacity === '' ? null : Number(edit.capacity) }
+    const { error } = edit.id
+      ? await supabase.from('recital_shows').update(payload).eq('id', edit.id)
+      : await supabase.from('recital_shows').insert(payload)
+    setSaving(false)
+    if (error) { console.error('RecitalShows: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    setEdit(null); load()
+  }
+  async function toggleActive(s) {
+    const { error } = await supabase.from('recital_shows').update({ active: !s.active }).eq('id', s.id)
+    if (error) { alert(`Could not update: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    if (!confirm('Delete this show? Any reservations already made for it stay in the system, just no longer linked to a visible show.')) return
+    const { error } = await supabase.from('recital_shows').delete().eq('id', id)
+    if (error) { alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
+  if (!rows) return <div className="loading">Loading…</div>
+  return (
+    <>
+      <div className="toolbar"><button className="btn" onClick={() => setEdit({ ...BLANK_SHOW })}>Add show</button></div>
+      {rows.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No shows yet</h3><p>Add at least one before families can reserve tickets.</p></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Date</th><th>Time</th><th>Capacity</th><th>Confirmed so far</th><th>Active</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr key={s.id} style={!s.active ? { opacity: 0.55 } : undefined}>
+                <td data-label="Name"><strong>{s.name}</strong></td>
+                <td data-label="Date">{s.show_date ? new Date(s.show_date + 'T00:00').toLocaleDateString() : '—'}</td>
+                <td data-label="Time">{s.show_time || '—'}</td>
+                <td data-label="Capacity">{s.capacity ?? '—'}</td>
+                <td data-label="Confirmed so far">{counts[s.id] || 0}{s.capacity ? ` / ${s.capacity}` : ''}</td>
+                <td data-label="Active">{s.active ? 'Yes' : 'No'}</td>
+                <td><div className="row-actions">
+                  <button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button>
+                  <button className="btn ghost small" onClick={() => toggleActive(s)}>{s.active ? 'Deactivate' : 'Activate'}</button>
+                  <button className="btn danger small" onClick={() => remove(s.id)}>Delete</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+      {edit && (
+        <Modal title={edit.id ? 'Edit show' : 'Add show'} onClose={() => { setEdit(null); setSaveErr('') }} onSave={save} saving={saving}>
+          {saveErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{saveErr}</div>}
+          <Field label="Show name" value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="e.g. Saturday 2:00pm Show" />
+          <div className="field row2">
+            <Field label="Date" type="date" value={edit.show_date || ''} onChange={(e) => setEdit({ ...edit, show_date: e.target.value })} />
+            <Field label="Time" value={edit.show_time || ''} onChange={(e) => setEdit({ ...edit, show_time: e.target.value })} placeholder="e.g. 2:00 PM" />
+          </div>
+          <Field label="Capacity (only used in Per Show mode — see Settings tab)" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} />
+        </Modal>
+      )}
+    </>
+  )
+}
+
+function RecitalReservationsTab() {
+  const [rows, setRows] = useState(null)
+  const [shows, setShows] = useState([])
+  const [showFilter, setShowFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [q, setQ] = useState('')
+  const [busyId, setBusyId] = useState('')
+  const load = useCallback(async () => {
+    const [r, s] = await Promise.all([
+      supabase.from('ticket_reservations').select('*, recital_shows(name)').order('created_at', { ascending: false }),
+      supabase.from('recital_shows').select('id, name').order('sort_order'),
+    ])
+    setRows(r.data || []); setShows(s.data || [])
+  }, [])
+  useEffect(() => { load() }, [load])
+  async function promote(id) {
+    setBusyId(id)
+    const { error } = await supabase.from('ticket_reservations').update({ status: 'confirmed' }).eq('id', id)
+    setBusyId('')
+    if (error) { alert(`Could not update: ${error.message}`); return }
+    load()
+  }
+  async function remove(id) {
+    if (!confirm('Remove this reservation entirely? This frees up those seats.')) return
+    const { error } = await supabase.from('ticket_reservations').delete().eq('id', id)
+    if (error) { alert(`Could not remove: ${error.message}`); return }
+    load()
+  }
+  if (!rows) return <div className="loading">Loading…</div>
+  const filtered = rows
+    .filter((r) => !showFilter || r.show_id === showFilter)
+    .filter((r) => statusFilter === 'all' ? true : r.status === statusFilter)
+    .filter((r) => !q || `${r.parent_name} ${r.student_name}`.toLowerCase().includes(q.toLowerCase()))
+  const totalConfirmedTickets = filtered.filter((r) => r.status === 'confirmed').reduce((sum, r) => sum + r.ticket_count, 0)
+  const emails = [...new Set(filtered.filter((r) => r.status === 'confirmed').map((r) => r.email).filter(Boolean))]
+  return (
+    <>
+      <div className="toolbar">
+        <input placeholder="Search parent or student…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select value={showFilter} onChange={(e) => setShowFilter(e.target.value)}>
+          <option value="">All shows</option>
+          {shows.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="all">All statuses</option>
+          <option value="confirmed">Confirmed only</option>
+          <option value="waitlist">Waitlist only</option>
+        </select>
+        <EmailGroupButton emails={emails} label="confirmed families in this view" />
+      </div>
+      <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>{filtered.length} reservation{filtered.length === 1 ? '' : 's'} shown · {totalConfirmedTickets} confirmed ticket{totalConfirmedTickets === 1 ? '' : 's'}</p>
+      {filtered.length === 0 ? (
+        <div className="card"><div className="empty"><h3>No reservations yet</h3></div></div>
+      ) : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Parent</th><th>Student</th><th>Show</th><th>Tickets</th><th>Status</th><th>Contact</th><th>Phase</th><th></th></tr></thead>
+          <tbody>
+            {filtered.map((r) => (
+              <tr key={r.id}>
+                <td data-label="Parent">{r.parent_name}</td>
+                <td data-label="Student">{r.student_name || '—'}</td>
+                <td data-label="Show">{r.recital_shows?.name || '—'}</td>
+                <td data-label="Tickets">{r.ticket_count}</td>
+                <td data-label="Status"><span className={`pill ${r.status === 'confirmed' ? 'enrolled' : 'waitlist'}`}>{r.status}</span></td>
+                <td data-label="Contact">{r.email}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.phone}</span></td>
+                <td data-label="Phase">{r.phase}</td>
+                <td><div className="row-actions">
+                  {r.status === 'waitlist' && <button className="btn ghost small" disabled={busyId === r.id} onClick={() => promote(r.id)}>Promote to confirmed</button>}
+                  <button className="btn danger small" onClick={() => remove(r.id)}>Remove</button>
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      )}
+    </>
+  )
+}
+
 function PrivacySettings() {
   const [s, setS] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -4068,6 +4361,7 @@ const NAV = [
   { key: 'classes', label: 'Classes', group: 'classes' },
   { key: 'rooms', label: 'Rooms', group: 'classes' },
   { key: 'season', label: 'New Season', group: 'classes' },
+  { key: 'recital', label: 'Recital Tickets', group: 'classes' },
   { key: 'students', label: 'Students', group: 'people' },
   { key: 'needs-class', label: 'Needs a Class', group: 'people' },
   { key: 'families', label: 'Families', group: 'people' },
@@ -4253,6 +4547,7 @@ export default function App() {
         {safePage === 'site-content' && !isTeacher && <SiteContent />}
         {safePage === 'privacy' && !isTeacher && <PrivacySettings />}
         {safePage === 'season' && !isTeacher && <SeasonRollover />}
+        {safePage === 'recital' && !isTeacher && <RecitalTickets />}
         {safePage === 'rooms' && <Rooms />}
         {safePage === 'registrations' && !isTeacher && <Registrations />}
         {safePage === 'parent-meetings' && !isTeacher && <ParentMeetings />}
