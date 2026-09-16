@@ -2342,8 +2342,30 @@ function Teachers() {
 
 function Attendance({ myTeacherId }) {
   const [classes, setClasses] = useState([])
-  const [classId, setClassId] = useState('')
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  // THE FIX for the "edited yesterday's sheet, it saved to today instead"
+  // report: this component fully resets classId/date to blank/today every
+  // time it mounts — including just clicking to a different admin page and
+  // back. Someone who opened a specific sheet to edit, then briefly
+  // navigated elsewhere before saving, would come back to a blank Mark
+  // tab with no signal they'd lost their place — re-picking the class and
+  // saving would land on a different date entirely, not the sheet they
+  // meant to edit. Restoring from sessionStorage means coming back to
+  // Attendance shows the exact same sheet you were just on, not a reset.
+  // Wrapped in try/catch since sessionStorage can be unavailable in some
+  // restrictive browser contexts (private browsing, etc.) — falls back
+  // to the original blank/today behavior rather than crashing the page.
+  const [classId, setClassId] = useState(() => {
+    try { return sessionStorage.getItem('shine_attendance_classId') || '' } catch { return '' }
+  })
+  const [date, setDate] = useState(() => {
+    try { return sessionStorage.getItem('shine_attendance_date') || new Date().toISOString().slice(0, 10) } catch { return new Date().toISOString().slice(0, 10) }
+  })
+  useEffect(() => {
+    try { if (classId) sessionStorage.setItem('shine_attendance_classId', classId); else sessionStorage.removeItem('shine_attendance_classId') } catch { /* ignore — not critical */ }
+  }, [classId])
+  useEffect(() => {
+    try { sessionStorage.setItem('shine_attendance_date', date) } catch { /* ignore — not critical */ }
+  }, [date])
   const [dateErr, setDateErr] = useState('')
   const [roster, setRoster] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -2423,20 +2445,26 @@ function Attendance({ myTeacherId }) {
   async function recheckAllAlerts() {
     if (!period.start || !period.end) { alert('Set the alert period first — there\'s nothing to check it against yet.'); return }
     setRechecking(true); setRecheckMsg('')
-    const { data: studs, error } = await supabase.from('students').select('id, first_name, last_name, families(email, parent_first_name)')
+    // Scoped to actual ENROLLMENTS now, not students broadly — this is
+    // what makes the fix real. Checking once per student (the old way)
+    // is exactly what combined a student's classes together in the first
+    // place; checking once per enrollment keeps each class separate.
+    const { data: enrs, error } = await supabase.from('enrollments').select('id, students(first_name, last_name, families(email, parent_first_name)), classes(name)').eq('status', 'enrolled')
     if (error) {
-      console.error('Attendance: recheckAllAlerts could not load students —', error)
+      console.error('Attendance: recheckAllAlerts could not load enrollments —', error)
       setRechecking(false)
       setRecheckMsg(`Could not run the check: ${error.message}`)
       return
     }
     let totalSent = 0, totalFailed = 0
-    for (const s of studs || []) {
-      const result = await checkAlertsForStudent({
-        student_id: s.id,
-        name: `${s.first_name} ${s.last_name}`,
-        parentEmail: s.families?.email || '',
-        parentFirstName: s.families?.parent_first_name || '',
+    for (const e of enrs || []) {
+      if (!e.students) continue
+      const result = await checkAlertsForEnrollment({
+        enrollment_id: e.id,
+        name: `${e.students.first_name} ${e.students.last_name}`,
+        className: e.classes?.name || '',
+        parentEmail: e.students.families?.email || '',
+        parentFirstName: e.students.families?.parent_first_name || '',
       })
       totalSent += result?.sent || 0
       totalFailed += result?.failed || 0
@@ -2444,10 +2472,10 @@ function Attendance({ myTeacherId }) {
     setRechecking(false)
     setRecheckMsg(
       totalFailed > 0
-        ? `Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'}. ${totalSent} alert${totalSent === 1 ? '' : 's'} sent, but ${totalFailed} FAILED to send and will need another try — check the browser console for the real error.`
+        ? `Checked ${(enrs || []).length} enrollment${(enrs || []).length === 1 ? '' : 's'}. ${totalSent} alert${totalSent === 1 ? '' : 's'} sent, but ${totalFailed} FAILED to send and will need another try — check the browser console for the real error.`
         : totalSent > 0
-          ? `Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'} — ${totalSent} alert${totalSent === 1 ? '' : 's'} sent successfully.`
-          : `Checked ${(studs || []).length} student${(studs || []).length === 1 ? '' : 's'} — nobody is currently due for a new alert.`
+          ? `Checked ${(enrs || []).length} enrollment${(enrs || []).length === 1 ? '' : 's'} — ${totalSent} alert${totalSent === 1 ? '' : 's'} sent successfully.`
+          : `Checked ${(enrs || []).length} enrollment${(enrs || []).length === 1 ? '' : 's'} — nobody is currently due for a new alert.`
     )
   }
 
@@ -2505,18 +2533,17 @@ function Attendance({ myTeacherId }) {
   // many times attendance gets corrected — the insert is the lock: if a row
   // for this (student, alert_type, period) already exists, the insert fails
   // on the unique constraint and no duplicate email goes out.
-  async function checkAlertsForStudent(r) {
-    if (!period.start || !period.end || !r.student_id) return { sent: 0, failed: 0 }
-    // Only count attendance from enrollments the student is actually still
-    // in. This used to have no status filter at all, so attendance from a
-    // class they DROPPED still counted toward their tardy/absence totals —
-    // which could fire a real alert email to a parent about a class their
-    // child is no longer enrolled in.
-    const { data: enrRows } = await supabase.from('enrollments').select('id').eq('student_id', r.student_id).eq('status', 'enrolled')
-    const enrIds = (enrRows || []).map((e) => e.id)
-    if (!enrIds.length) return { sent: 0, failed: 0 }
+  // THE FIX: this used to count a student's tardies/absences COMBINED
+  // across every class they're enrolled in — so a student absent once
+  // each in three different classes incorrectly triggered a "3rd
+  // absence" alert, despite not having hit even a 1st-absence threshold
+  // in any single class. Now scoped to exactly one enrollment (one
+  // student, one specific class) per call — the caller is responsible
+  // for calling this once per class, not once per student.
+  async function checkAlertsForEnrollment(r) {
+    if (!period.start || !period.end || !r.enrollment_id) return { sent: 0, failed: 0 }
     const { data: attRows } = await supabase.from('attendance').select('status')
-      .in('enrollment_id', enrIds).gte('class_date', period.start).lte('class_date', period.end)
+      .eq('enrollment_id', r.enrollment_id).gte('class_date', period.start).lte('class_date', period.end)
     const tardyCount = (attRows || []).filter((a) => a.status === 'tardy').length
     const absentCount = (attRows || []).filter((a) => a.status === 'absent').length
     const checks = [
@@ -2528,7 +2555,7 @@ function Attendance({ myTeacherId }) {
     let sent = 0, failed = 0
     for (const [alertType, hitThreshold, word, n] of checks) {
       if (!hitThreshold) continue
-      const { error: lockErr } = await supabase.from('attendance_alerts_sent').insert({ student_id: r.student_id, alert_type: alertType, period_start: period.start })
+      const { error: lockErr } = await supabase.from('attendance_alerts_sent').insert({ enrollment_id: r.enrollment_id, alert_type: alertType, period_start: period.start })
       if (lockErr) {
         // A duplicate-key error is the EXPECTED case — it means this exact
         // alert already went out, and skipping is correct. But any other
@@ -2536,19 +2563,19 @@ function Attendance({ myTeacherId }) {
         // was silently swallowed, quietly dropping an alert that never
         // actually sent. Postgres reports a unique violation as code 23505.
         if (lockErr.code !== '23505') {
-          console.error(`Attendance alert: could not record "${alertType}" for student ${r.student_id}, skipping send to avoid a possible duplicate —`, lockErr)
+          console.error(`Attendance alert: could not record "${alertType}" for enrollment ${r.enrollment_id}, skipping send to avoid a possible duplicate —`, lockErr)
         }
         continue
       }
       const ord = n === 2 ? '2nd' : '3rd'
-      const subject = `Attendance alert: ${r.name} — ${ord} ${word}`
+      const subject = `Attendance alert: ${r.name} — ${ord} ${word} in ${r.className || 'class'}`
       // Greets the PARENT by name — this used to greet the student instead,
       // since it was pulling the first word of r.name (the student's name)
       // for a message addressed to the parent. Falls back to a neutral
       // greeting if the family record has no parent first name on file.
       const message = [
         `Hi ${r.parentFirstName || 'there'},`, '',
-        `This is a note that ${r.name} has reached their ${ord} ${word} of the current period (${period.start} to ${period.end}).`,
+        `This is a note that ${r.name} has reached their ${ord} ${word} in ${r.className || 'class'} for the current period (${period.start} to ${period.end}).`,
         n === 3 ? 'Please reach out if there is anything we can help with.' : '',
         '', 'Grace and Peace,', 'Corrie / Shine Dance Studio',
       ].filter(Boolean).join('\n')
@@ -2565,8 +2592,8 @@ function Attendance({ myTeacherId }) {
           // period" would retry it, since the lock already exists. Rolling
           // the lock back on a real send failure means it can be retried
           // instead of silently disappearing forever.
-          console.error(`Attendance alert: send actually failed for "${alertType}" (student ${r.student_id}) — ${result.error}. Removing the lock so this can be retried.`)
-          await supabase.from('attendance_alerts_sent').delete().eq('student_id', r.student_id).eq('alert_type', alertType).eq('period_start', period.start)
+          console.error(`Attendance alert: send actually failed for "${alertType}" (enrollment ${r.enrollment_id}) — ${result.error}. Removing the lock so this can be retried.`)
+          await supabase.from('attendance_alerts_sent').delete().eq('enrollment_id', r.enrollment_id).eq('alert_type', alertType).eq('period_start', period.start)
           failed++
         } else {
           sent++
@@ -2577,6 +2604,19 @@ function Attendance({ myTeacherId }) {
   }
 
   async function save() {
+    // Last-line-of-defense check, on top of switchClass/switchDate already
+    // blocking a mismatched date in the normal flow. A stray sheet showed
+    // up for a class on the wrong day of the week despite that — every
+    // path into this state was checked and each looked correct on its
+    // own, so rather than keep chasing exactly which combination of clicks
+    // slipped through, this makes it structurally impossible to actually
+    // WRITE a mismatched sheet no matter how the state got here.
+    const currentClass = classes.find((c) => c.id === classId)
+    if (currentClass && !dateMatchesDay(date, currentClass.day_of_week)) {
+      console.error(`Attendance: refused to save — ${currentClass.name} meets on ${currentClass.day_of_week}s, but the selected date was ${date}.`)
+      setSavedMsg(`Could not save: ${currentClass.name} meets on ${currentClass.day_of_week}s — this date doesn't match. Please re-select a valid date.`)
+      return
+    }
     setSaving(true)
     const ids = roster.map((r) => r.enrollment_id)
     const { error: deleteErr } = await supabase.from('attendance').delete().eq('class_date', date).in('enrollment_id', ids)
@@ -2604,8 +2644,13 @@ function Attendance({ myTeacherId }) {
     // Fire-and-forget: alert checks run after save confirms, don't block the
     // "Saved" message on email sending. Only reached once the save above is
     // confirmed to have actually succeeded — otherwise this would compute
-    // alert counts from data that was never actually written.
-    for (const r of roster.filter((r) => r.status === 'tardy' || r.status === 'absent')) checkAlertsForStudent(r)
+    // alert counts from data that was never actually written. Each call is
+    // scoped to just this one class (currentClass, already resolved above)
+    // — not the student's other classes, which is the whole point of the fix.
+    const currentClassName = currentClass?.name || ''
+    for (const r of roster.filter((r) => r.status === 'tardy' || r.status === 'absent')) {
+      checkAlertsForEnrollment({ ...r, className: currentClassName })
+    }
   }
 
   // Auto-saves whatever's currently marked before switching class or date —
@@ -2799,13 +2844,24 @@ function AttendanceHistory({ myTeacherId, onOpen }) {
       const cls = classMap[enr.classId]
       if (!cls) continue
       const key = `${enr.classId}|${a.class_date}`
-      if (!groups[key]) groups[key] = { classId: enr.classId, className: cls.name, day: cls.day_of_week, date: a.class_date, present: 0, tardy: 0, absent: 0, students: [] }
+      if (!groups[key]) groups[key] = { classId: enr.classId, className: cls.name, day: cls.day_of_week, date: a.class_date, present: 0, tardy: 0, absent: 0, students: [], enrollmentIds: [] }
       groups[key][a.status] = (groups[key][a.status] || 0) + 1
+      groups[key].enrollmentIds.push(a.enrollment_id)
       if (enr.studentName) groups[key].students.push(enr.studentName)
     }
     setSheets(Object.values(groups).sort((a, b) => b.date.localeCompare(a.date)))
   }, [myTeacherId])
   useEffect(() => { load() }, [load])
+
+  const [deleting, setDeleting] = useState(null) // key of the sheet being deleted, for the button's own busy state
+  async function deleteSheet(sheet) {
+    if (!confirm(`Delete the ${sheet.className} sheet for ${new Date(sheet.date + 'T00:00').toLocaleDateString()}? This removes every student's mark on it — cannot be undone.`)) return
+    setDeleting(`${sheet.classId}|${sheet.date}`)
+    const { error } = await supabase.from('attendance').delete().eq('class_date', sheet.date).in('enrollment_id', sheet.enrollmentIds)
+    setDeleting(null)
+    if (error) { console.error('AttendanceHistory: delete failed —', error); alert(`Could not delete: ${error.message}`); return }
+    load()
+  }
 
   if (sheets === null) return <div className="loading">Loading…</div>
   if (loadErr) return <div className="card" style={{ color: '#b23838' }}>Could not load saved sheets: {loadErr}</div>
@@ -2843,7 +2899,10 @@ function AttendanceHistory({ myTeacherId, onOpen }) {
                 <td data-label="Present">{s.present || 0}</td>
                 <td data-label="Tardy">{s.tardy || 0}</td>
                 <td data-label="Absent">{s.absent || 0}</td>
-                <td><button className="btn ghost small" onClick={() => onOpen(s.classId, s.date)}>View / Edit</button></td>
+                <td><div className="row-actions">
+                  <button className="btn ghost small" onClick={() => onOpen(s.classId, s.date)}>View / Edit</button>
+                  <button className="btn danger small" disabled={deleting === `${s.classId}|${s.date}`} onClick={() => deleteSheet(s)}>Delete</button>
+                </div></td>
               </tr>
             ))}
           </tbody>
