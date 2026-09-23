@@ -174,13 +174,33 @@ function Dashboard({ go }) {
   const [stats, setStats] = useState(null)
   useEffect(() => {
     (async () => {
-      const [students, families, classes, regs] = await Promise.all([
-        supabase.from('students').select('id', { count: 'exact', head: true }),
+      // The student number here used to be a raw count of EVERY student
+      // row, inactive ones included — so it kept counting dancers who had
+      // left, and drifted further from reality every season. It's now
+      // active-only, which is what "how many students do we have" actually
+      // means. Pulling the rows (rather than a head-count) is what makes
+      // the "needs a class" number possible too, since that one depends on
+      // whether each student has any enrolled class.
+      const [students, families, classes, regs, enr] = await Promise.all([
+        supabase.from('students').select('id, season_status'),
         supabase.from('families').select('id', { count: 'exact', head: true }),
         supabase.from('classes').select('id', { count: 'exact', head: true }).eq('active', true),
         supabase.from('registrations').select('id', { count: 'exact', head: true }).eq('processed', false),
+        supabase.from('enrollments').select('student_id').eq('status', 'enrolled'),
       ])
-      setStats({ students: students.count ?? 0, families: families.count ?? 0, classes: classes.count ?? 0, newReg: regs.count ?? 0 })
+      const studentRows = students.data || []
+      const hasClass = new Set((enr.data || []).map((e) => e.student_id))
+      const activeStudents = studentRows.filter((s) => (s.season_status || 'active') === 'active').length
+      // Same definition the Needs a Class screen uses, so the two numbers
+      // always agree.
+      const needsClass = studentRows.filter((s) => (s.season_status || 'active') === 'inactive' && !hasClass.has(s.id)).length
+      setStats({
+        students: activeStudents,
+        needsClass,
+        families: families.count ?? 0,
+        classes: classes.count ?? 0,
+        newReg: regs.count ?? 0,
+      })
     })()
   }, [])
   if (!stats) return <div className="loading">Loading…</div>
@@ -188,7 +208,9 @@ function Dashboard({ go }) {
     <>
       <div className="page-head"><div><h1>Dashboard</h1><p>A quick read on where things stand.</p></div></div>
       <div className="stat-grid">
-        <div className="stat"><div className="num">{stats.students}</div><div className="label">Students</div></div>
+        <div className="stat"><div className="num">{stats.students}</div><div className="label">Active students</div></div>
+        <div className="stat" style={{ cursor: 'pointer' }} onClick={() => go('needs-class')}>
+          <div className="num">{stats.needsClass}</div><div className="label">Needs a class</div></div>
         <div className="stat"><div className="num">{stats.families}</div><div className="label">Families</div></div>
         <div className="stat"><div className="num">{stats.classes}</div><div className="label">Active classes</div></div>
         <div className="stat accent" style={{ cursor: 'pointer' }} onClick={() => go('registrations')}>
@@ -1168,11 +1190,26 @@ function Students({ needsClassOnly = false } = {}) {
       name: (s) => `${s.last_name} ${s.first_name}`.toLowerCase(),
       grade: (s) => s.grade || '',
       age: (s) => s.age || '',
-      level: (s) => s.level || '',
       family: (s) => s.families ? `${s.families.parent_last_name} ${s.families.parent_first_name}`.toLowerCase() : '',
       registered: (s) => s.registered_at || '',
     }
   )
+
+  // Counts are computed from the full `rows` list, NOT from `filtered` —
+  // they're meant to answer "how many students do we have," which
+  // shouldn't change just because someone typed in the search box or
+  // flipped to the Inactive filter.
+  //
+  // "Needs a class" deliberately uses the exact same definition as the
+  // Needs a Class screen itself (inactive AND no enrolled classes). If
+  // these two ever used different rules, the number here wouldn't match
+  // the number of rows on that screen, which is worse than showing no
+  // number at all.
+  const activeCount = rows.filter((s) => (s.season_status || 'active') === 'active').length
+  const needsClassCount = rows.filter((s) =>
+    (s.season_status || 'active') === 'inactive' && !(enrollMap[s.id] && enrollMap[s.id].length)
+  ).length
+
   return (
     <>
       <div className="page-head">
@@ -1180,7 +1217,7 @@ function Students({ needsClassOnly = false } = {}) {
           <h1>{needsClassOnly ? 'Needs a Class' : 'Students'}</h1>
           <p>{needsClassOnly
             ? `Registered but not placed in a class yet — usually because they picked "Not sure yet" at registration, or a class they picked no longer exists. ${filtered.length} right now.`
-            : 'Every dancer, linked to a family.'}</p>
+            : `${activeCount} active student${activeCount === 1 ? '' : 's'}${needsClassCount > 0 ? ` · ${needsClassCount} still need${needsClassCount === 1 ? 's' : ''} a class` : ''}${filtered.length !== activeCount ? ` · showing ${filtered.length}` : ''}`}</p>
         </div>
         <button className="btn" onClick={() => setEdit({ ...BLANK_STUDENT })}>Add student</button>
       </div>
@@ -1329,7 +1366,7 @@ function Students({ needsClassOnly = false } = {}) {
         <div className="card"><div className="empty"><h3>No students found</h3><p>Add a student, or adjust your search.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Age" sortKey="age" sort={sort} /><SortTh label="Level" sortKey="level" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><SortTh label="Registered" sortKey="registered" sort={sort} /><th></th></tr></thead>
+          <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))} onChange={() => toggleSelectAll(filtered.map((s) => s.id))} /></th><SortTh label="Student" sortKey="name" sort={sort} /><SortTh label="Grade" sortKey="grade" sort={sort} /><SortTh label="Age" sortKey="age" sort={sort} /><th>Classes</th><SortTh label="Family" sortKey="family" sort={sort} /><SortTh label="Registered" sortKey="registered" sort={sort} /><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
@@ -1344,7 +1381,6 @@ function Students({ needsClassOnly = false } = {}) {
                 </td>
                 <td data-label="Grade">{s.grade || '—'}</td>
                 <td data-label="Age">{s.age || '—'}</td>
-                <td data-label="Level">{s.level || '—'}</td>
                 <td data-label="Classes" style={{ fontSize: 13 }}>{(enrollMap[s.id] || []).length ? enrollMap[s.id].join(', ') : <span style={{ color: 'var(--ink-soft)' }}>—</span>}</td>
                 <td data-label="Family">{s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : '—'}</td>
                 <td data-label="Registered">{s.registered_at ? new Date(s.registered_at).toLocaleDateString() : '—'}</td>
@@ -3860,6 +3896,20 @@ function RecitalTickets() {
   )
 }
 
+// Converts a stored timestamp (UTC ISO from the database, or a raw
+// datetime-local string mid-edit) into the "YYYY-MM-DDTHH:MM" local-time
+// form a datetime-local input expects. A naive .slice(0, 16) on the UTC
+// string would show the UTC hour, not the local one — which is exactly
+// how the deadline bug hid itself: the picker looked right while the
+// stored instant was hours off.
+function toLocalInputValue(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 function RecitalSettingsTab() {
   const [settings, setSettings] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -3876,7 +3926,13 @@ function RecitalSettingsTab() {
     const { error } = await supabase.from('recital_settings').update({
       capacity_mode: settings.capacity_mode,
       combined_capacity: settings.combined_capacity === '' ? null : Number(settings.combined_capacity),
-      reservation_deadline: settings.reservation_deadline || null,
+      // The datetime-local picker gives a timezone-less string (e.g.
+      // "2026-10-05T18:00"). Saving that raw into a timestamptz column
+      // gets interpreted as UTC by the database, so "6:00 PM" would
+      // silently become 6:00 PM UTC = 11:00 AM Pacific, seven hours early.
+      // new Date() parses a timezone-less string as LOCAL time, and
+      // toISOString() then converts that to the correct UTC instant.
+      reservation_deadline: settings.reservation_deadline ? new Date(settings.reservation_deadline).toISOString() : null,
     }).eq('id', 1)
     setSaving(false)
     if (error) { console.error('RecitalSettings: save failed —', error); setSavedNote(`Could not save: ${error.message}`); return }
@@ -3934,7 +3990,7 @@ function RecitalSettingsTab() {
         ) : (
           <Field label="Combined capacity (across all shows)" type="number" value={settings.combined_capacity ?? ''} onChange={(e) => setSettings({ ...settings, combined_capacity: e.target.value })} placeholder="Total seats across every show" />
         )}
-        <Field label="Automatic release deadline (optional)" type="datetime-local" value={settings.reservation_deadline ? settings.reservation_deadline.slice(0, 16) : ''} onChange={(e) => setSettings({ ...settings, reservation_deadline: e.target.value })} />
+        <Field label="Automatic release deadline (optional)" type="datetime-local" value={toLocalInputValue(settings.reservation_deadline)} onChange={(e) => setSettings({ ...settings, reservation_deadline: e.target.value })} />
         <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6 }}>Leave blank if you'd rather release manually whenever you decide, instead of on a fixed schedule.</p>
         <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
         {savedNote && <span style={{ marginLeft: 10, fontSize: 14, color: savedNote.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)' }}>{savedNote}</span>}
@@ -4040,9 +4096,33 @@ function RecitalReservationsTab() {
     setRows(r.data || []); setShows(s.data || [])
   }, [])
   useEffect(() => { load() }, [load])
-  async function promote(id) {
-    setBusyId(id)
-    const { error } = await supabase.from('ticket_reservations').update({ status: 'confirmed' }).eq('id', id)
+  // Promoting off the waitlist deliberately does NOT hard-block at
+  // capacity — Corrie may well have a real reason to seat one more
+  // (a no-show, an extra chair). But it shouldn't happen silently and
+  // by accident either, so this warns with the real numbers first and
+  // lets her decide.
+  async function promote(row) {
+    const settings = await supabase.from('recital_settings').select('capacity_mode, combined_capacity').eq('id', 1).maybeSingle()
+    const mode = settings.data?.capacity_mode || 'per_show'
+    let capacity = null, current = null
+    if (mode === 'per_show') {
+      const show = shows.find((s) => s.id === row.show_id)
+      if (show?.capacity) {
+        const { data: counts } = await supabase.rpc('ticket_counts_by_show')
+        capacity = show.capacity
+        current = Number((counts || []).find((c) => c.show_id === row.show_id)?.confirmed_count) || 0
+      }
+    } else if (settings.data?.combined_capacity) {
+      const { data: total } = await supabase.rpc('ticket_count_combined')
+      capacity = settings.data.combined_capacity
+      current = Number(total) || 0
+    }
+    if (capacity !== null && current + row.ticket_count > capacity) {
+      const over = current + row.ticket_count - capacity
+      if (!confirm(`Heads up: confirming these ${row.ticket_count} ticket${row.ticket_count === 1 ? '' : 's'} puts you ${over} over capacity (${current} of ${capacity} currently confirmed). Continue anyway?`)) return
+    }
+    setBusyId(row.id)
+    const { error } = await supabase.from('ticket_reservations').update({ status: 'confirmed' }).eq('id', row.id)
     setBusyId('')
     if (error) { alert(`Could not update: ${error.message}`); return }
     load()
@@ -4053,6 +4133,39 @@ function RecitalReservationsTab() {
     if (error) { alert(`Could not remove: ${error.message}`); return }
     load()
   }
+  // Printable door list for check-in at the recital — alphabetized by
+  // the last word of the parent's name, with a blank box to tick off
+  // arrivals. Confirmed only: a waitlisted row isn't a seat anyone should
+  // be let in on, so putting it on the door sheet would be misleading.
+  function printDoorList() {
+    const forShow = rows.filter((r) => r.status === 'confirmed' && (!showFilter || r.show_id === showFilter))
+    if (!forShow.length) { alert('No confirmed reservations to print for this selection.'); return }
+    const sorted = forShow.slice().sort((a, b) => {
+      const an = (a.parent_name || '').trim().split(/\s+/).slice(-1)[0].toLowerCase()
+      const bn = (b.parent_name || '').trim().split(/\s+/).slice(-1)[0].toLowerCase()
+      return an.localeCompare(bn) || (a.parent_name || '').localeCompare(b.parent_name || '')
+    })
+    const showName = showFilter ? (shows.find((s) => s.id === showFilter)?.name || '') : 'All shows'
+    const totalTickets = sorted.reduce((sum, r) => sum + r.ticket_count, 0)
+    const w = window.open('', '_blank')
+    w.document.write(`<!doctype html><html><head><title>Door list</title><style>
+      body{font-family:Georgia,serif;margin:26px;color:#222}
+      h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 14px}
+      table{width:100%;border-collapse:collapse;font-size:13px}
+      th,td{border:1px solid #999;padding:7px 8px;text-align:left}
+      th{background:#eee;font-size:11px}
+      .box{width:34px;text-align:center}
+      @media print { body{margin:10mm} }
+    </style></head><body>
+      <h1>Door Check-In — ${showName}</h1>
+      <p class="sub">${sorted.length} ${sorted.length === 1 ? 'family' : 'families'} · ${totalTickets} ticket${totalTickets === 1 ? '' : 's'} · Printed ${new Date().toLocaleDateString()}</p>
+      <table><tr><th class="box">✓</th><th>Family</th><th>Dancer</th><th>Tickets</th>${showFilter ? '' : '<th>Show</th>'}</tr>
+      ${sorted.map((r) => `<tr><td class="box"></td><td>${r.parent_name || ''}</td><td>${r.student_name || ''}</td><td>${r.ticket_count}</td>${showFilter ? '' : `<td>${r.recital_shows?.name || ''}</td>`}</tr>`).join('')}
+      </table>
+    </body></html>`)
+    w.document.close(); w.focus(); w.print()
+  }
+
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = rows
     .filter((r) => !showFilter || r.show_id === showFilter)
@@ -4074,6 +4187,7 @@ function RecitalReservationsTab() {
           <option value="waitlist">Waitlist only</option>
         </select>
         <EmailGroupButton emails={emails} label="confirmed families in this view" />
+        <button className="btn ghost small" onClick={printDoorList}>Print door list</button>
       </div>
       <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>{filtered.length} reservation{filtered.length === 1 ? '' : 's'} shown · {totalConfirmedTickets} confirmed ticket{totalConfirmedTickets === 1 ? '' : 's'}</p>
       {filtered.length === 0 ? (
@@ -4092,7 +4206,7 @@ function RecitalReservationsTab() {
                 <td data-label="Contact">{r.email}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.phone}</span></td>
                 <td data-label="Phase">{r.phase}</td>
                 <td><div className="row-actions">
-                  {r.status === 'waitlist' && <button className="btn ghost small" disabled={busyId === r.id} onClick={() => promote(r.id)}>Promote to confirmed</button>}
+                  {r.status === 'waitlist' && <button className="btn ghost small" disabled={busyId === r.id} onClick={() => promote(r)}>Promote to confirmed</button>}
                   <button className="btn danger small" onClick={() => remove(r.id)}>Remove</button>
                 </div></td>
               </tr>
