@@ -98,6 +98,20 @@ function SortTh({ label, sortKey, sort }) {
 }
 // getters: { columnKey: (row) => sortableValue }. Rows with no getter for
 // the current key pass through unsorted (safe no-op).
+// A calendar date (YYYY-MM-DD) in the BROWSER'S OWN timezone.
+//
+// The obvious-looking new Date().toISOString().slice(0, 10) does NOT do
+// this — it converts to UTC first. Pacific is 7-8 hours behind UTC, so
+// from 5:00 PM onward (4:00 PM in winter) that returns TOMORROW'S date.
+// Shine's classes run into the evening, so attendance marked after a
+// late class was defaulting to the next day, and the "next date for this
+// class's weekday" helper was computing a day ahead too. That put sheets
+// on dates the class doesn't even meet — including a Tuesday class
+// showing up with a Wednesday sheet.
+function localDateString(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function applySort(rows, sort, getters) {
   const get = getters[sort.key]
   if (!get) return rows
@@ -2394,7 +2408,7 @@ function Attendance({ myTeacherId }) {
     try { return sessionStorage.getItem('shine_attendance_classId') || '' } catch { return '' }
   })
   const [date, setDate] = useState(() => {
-    try { return sessionStorage.getItem('shine_attendance_date') || new Date().toISOString().slice(0, 10) } catch { return new Date().toISOString().slice(0, 10) }
+    try { return sessionStorage.getItem('shine_attendance_date') || localDateString() } catch { return localDateString() }
   })
   useEffect(() => {
     try { if (classId) sessionStorage.setItem('shine_attendance_classId', classId); else sessionStorage.removeItem('shine_attendance_classId') } catch { /* ignore — not critical */ }
@@ -2417,13 +2431,13 @@ function Attendance({ myTeacherId }) {
   // weekdays are pickable on its own, so this is enforced in JS instead.
   function nextDateForDay(dayName, from = new Date()) {
     const target = CLASS_DAY_ORDER.indexOf(dayName)
-    if (target === -1) return from.toISOString().slice(0, 10)
+    if (target === -1) return localDateString(from)
     const d = new Date(from)
     // JS getDay(): 0=Sunday...6=Saturday. CLASS_DAY_ORDER: 0=Monday...6=Sunday.
     const jsTarget = (target + 1) % 7
     let diff = (jsTarget - d.getDay() + 7) % 7
     d.setDate(d.getDate() + diff)
-    return d.toISOString().slice(0, 10)
+    return localDateString(d)
   }
   function dateMatchesDay(dateStr, dayName) {
     if (!dayName || !dateStr) return true
@@ -2744,7 +2758,7 @@ function Attendance({ myTeacherId }) {
       {tab === 'history' ? (
         <AttendanceHistory myTeacherId={myTeacherId} onOpen={openSheet} />
       ) : tab === 'print' ? (
-        <MonthlyRosterPrint classes={classes} myTeacherId={myTeacherId} />
+        <MonthlyRosterPrint classes={classes} />
       ) : (
       <>
       {!myTeacherId && (
@@ -2963,9 +2977,9 @@ const STATUS_SYMBOL = { present: '✓', absent: '✗', tardy: '–' } // tardy a
 // covers both. Selecting both records here combines them onto one sheet,
 // which is the practical way to get a "Monday/Wednesday" roster without
 // changing how classes are stored.
-function MonthlyRosterPrint({ classes, myTeacherId }) {
+function MonthlyRosterPrint({ classes }) {
   const [classId, setClassId] = useState('')
-  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7)) // YYYY-MM
+  const [month, setMonth] = useState(() => localDateString().slice(0, 7)) // YYYY-MM, in local time (see localDateString)
   const [report, setReport] = useState(null) // { dates: [...], students: [{name, marks: {date: status}}] }
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
@@ -2975,7 +2989,7 @@ function MonthlyRosterPrint({ classes, myTeacherId }) {
     setErr(''); setLoading(true); setReport(null)
     const [y, m] = month.split('-').map(Number)
     const monthStart = `${month}-01`
-    const monthEnd = new Date(y, m, 0).toISOString().slice(0, 10) // last real day of that month
+    const monthEnd = localDateString(new Date(y, m, 0)) // last real day of that month
 
     const { data: enrData, error: enrErr } = await supabase.from('enrollments').select('id, class_id, students(id, first_name, last_name)').eq('class_id', classId).eq('status', 'enrolled')
     if (enrErr) { console.error('MonthlyRosterPrint: loading enrollments failed —', enrErr); setErr(enrErr.message); setLoading(false); return }
@@ -3765,8 +3779,28 @@ function SeasonRollover() {
   function toggleAll(v) { setSelected(Object.fromEntries(sourceClasses.map((c) => [c.id, v]))) }
 
   async function runRollover() {
-    setRunning(true); setResult('')
     const toCopy = sourceClasses.filter((c) => selected[c.id])
+    // Every other destructive action in this app confirms first (deleting a
+    // student, deleting an attendance sheet, merging duplicates, releasing
+    // tickets). This one changed more than any of them — copying the whole
+    // class list forward AND deactivating last season's classes — on a
+    // single unconfirmed click.
+    //
+    // The duplicate warning matters just as much: nothing stopped a second
+    // run from creating a complete second copy of every class in the target
+    // season, and the only sign would be a class list that had quietly
+    // doubled.
+    const alreadyInTarget = (classes || []).filter((c) => (c.season || 'unlabeled') === targetSeason)
+    const lines = [
+      `Copy ${toCopy.length} class${toCopy.length === 1 ? '' : 'es'} from ${sourceSeason} into ${targetSeason}?`,
+      retireSource ? `\n${sourceSeason}'s classes will also be marked inactive, so they stop showing on the registration form.` : '',
+      alreadyInTarget.length
+        ? `\n\nHEADS UP: ${targetSeason} already has ${alreadyInTarget.length} class${alreadyInTarget.length === 1 ? '' : 'es'}. Continuing will ADD to them, not replace them — if this rollover was already run, you'll end up with duplicates.`
+        : '',
+    ].filter(Boolean).join('')
+    if (!confirm(lines)) return
+
+    setRunning(true); setResult('')
     const payload = toCopy.map((c) => ({
       name: c.name, level: c.level, day_of_week: c.day_of_week, start_time: c.start_time,
       end_time: c.end_time, location: c.location, capacity: c.capacity, instructor_name: c.instructor_name,
