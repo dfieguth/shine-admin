@@ -112,6 +112,18 @@ function localDateString(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+// Every email address on a family record: primary parent, 2nd parent, and
+// the additional family member/guardian contact. Group email buttons used
+// to read only the primary `email` field, so 2nd parents and extra
+// contacts were silently left off every "Copy emails" / bulk send even
+// though their addresses were on file.
+function familyEmails(fam) {
+  if (!fam) return []
+  return [fam.email, fam.secondary_parent_email, fam.tertiary_parent_email]
+    .map((e) => (e || '').trim())
+    .filter(Boolean)
+}
+
 function applySort(rows, sort, getters) {
   const get = getters[sort.key]
   if (!get) return rows
@@ -1305,7 +1317,7 @@ function Students({ needsClassOnly = false } = {}) {
               </>
             )}
             <EmailGroupButton
-              emails={[...new Set(rows.filter((s) => selectedIds.has(s.id) && s.families?.email).map((s) => s.families.email))]}
+              emails={[...new Set(rows.filter((s) => selectedIds.has(s.id)).flatMap((s) => familyEmails(s.families)))]}
               label={`${selectedIds.size} selected famil${selectedIds.size === 1 ? 'y' : 'ies'}`}
             />
             <button className="btn ghost small" onClick={() => setSelectedIds(new Set())}>Clear</button>
@@ -1646,8 +1658,8 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   }
   const [copied, setCopied] = useState('')
   async function copyEmails() {
-    const { data } = await supabase.from('enrollments').select('students(families(email))').eq('class_id', filterClass).eq('status', 'enrolled')
-    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    const { data } = await supabase.from('enrollments').select('students(families(email, secondary_parent_email, tertiary_parent_email))').eq('class_id', filterClass).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).flatMap((r) => familyEmails(r.students?.families)))]
     if (!emails.length) { setCopied('No emails found'); setTimeout(() => setCopied(''), 2500); return }
     await navigator.clipboard.writeText(emails.join('; '))
     setCopied(`Copied ${emails.length} email${emails.length > 1 ? 's' : ''} ✓`)
@@ -1662,8 +1674,8 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   const [bcSending, setBcSending] = useState(false)
   const [bcNote, setBcNote] = useState('')
   async function openBroadcast() {
-    const { data } = await supabase.from('enrollments').select('students(families(email))').eq('class_id', filterClass).eq('status', 'enrolled')
-    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    const { data } = await supabase.from('enrollments').select('students(families(email, secondary_parent_email, tertiary_parent_email))').eq('class_id', filterClass).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).flatMap((r) => familyEmails(r.students?.families)))]
     const cls = classes.find((c) => c.id === filterClass)
     setBcSubject(''); setBcMessage(''); setBcNote('')
     setBroadcast({ emails, className: cls?.name || 'class' })
@@ -1678,8 +1690,8 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   async function copyGroupEmails() {
     const groupClasses = classes.filter((c) => classGroupVal(c, groupBy) === groupValue)
     const ids = groupClasses.map((c) => c.id)
-    const { data } = await supabase.from('enrollments').select('students(families(email))').in('class_id', ids).eq('status', 'enrolled')
-    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    const { data } = await supabase.from('enrollments').select('students(families(email, secondary_parent_email, tertiary_parent_email))').in('class_id', ids).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).flatMap((r) => familyEmails(r.students?.families)))]
     if (!emails.length) { setGroupCopied('No emails found'); setTimeout(() => setGroupCopied(''), 2500); return }
     await navigator.clipboard.writeText(emails.join('; '))
     setGroupCopied(`Copied ${emails.length} email${emails.length > 1 ? 's' : ''} ✓`)
@@ -1688,8 +1700,8 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   async function openGroupBroadcast() {
     const groupClasses = classes.filter((c) => classGroupVal(c, groupBy) === groupValue)
     const ids = groupClasses.map((c) => c.id)
-    const { data } = await supabase.from('enrollments').select('students(families(email))').in('class_id', ids).eq('status', 'enrolled')
-    const emails = [...new Set((data || []).map((r) => r.students?.families?.email).filter(Boolean))]
+    const { data } = await supabase.from('enrollments').select('students(families(email, secondary_parent_email, tertiary_parent_email))').in('class_id', ids).eq('status', 'enrolled')
+    const emails = [...new Set((data || []).flatMap((r) => familyEmails(r.students?.families)))]
     setBcSubject(''); setBcMessage(''); setBcNote('')
     setBroadcast({ emails, className: `${groupValue} (${groupClasses.length} classes)` })
   }
@@ -2603,10 +2615,16 @@ function Attendance({ myTeacherId }) {
       ['absent_3', absentCount >= 3, 'absent', 3],
     ]
     let sent = 0, failed = 0
+    const problems = []
     for (const [alertType, hitThreshold, word, n] of checks) {
       if (!hitThreshold) continue
       const { error: lockErr } = await supabase.from('attendance_alerts_sent').insert({ enrollment_id: r.enrollment_id, alert_type: alertType, period_start: period.start })
       if (lockErr) {
+        // Anything other than "already sent" is a real failure and now
+        // counts as one. This is the exact spot where a missing or
+        // wrong-shaped tracking table used to swallow every alert without
+        // a trace visible to anyone but the browser console.
+        if (lockErr.code !== '23505') { failed++; problems.push(`tracking table error: ${lockErr.message}`) }
         // A duplicate-key error is the EXPECTED case — it means this exact
         // alert already went out, and skipping is correct. But any other
         // error (network blip, permissions) landed in this same branch and
@@ -2645,12 +2663,13 @@ function Attendance({ myTeacherId }) {
           console.error(`Attendance alert: send actually failed for "${alertType}" (enrollment ${r.enrollment_id}) — ${result.error}. Removing the lock so this can be retried.`)
           await supabase.from('attendance_alerts_sent').delete().eq('enrollment_id', r.enrollment_id).eq('alert_type', alertType).eq('period_start', period.start)
           failed++
+          problems.push(result.error)
         } else {
           sent++
         }
       }
     }
-    return { sent, failed }
+    return { sent, failed, problems }
   }
 
   async function save() {
@@ -2668,39 +2687,70 @@ function Attendance({ myTeacherId }) {
       return
     }
     setSaving(true)
-    const ids = roster.map((r) => r.enrollment_id)
-    const { error: deleteErr } = await supabase.from('attendance').delete().eq('class_date', date).in('enrollment_id', ids)
-    if (deleteErr) {
-      console.error('Attendance: clearing previous marks failed —', deleteErr)
-      setSaving(false)
-      setSavedMsg(`Could not save: ${deleteErr.message}`)
-      return
-    }
+    // THE FIX for "I changed Absent to Tardy on yesterday's sheet and now
+    // the student shows BOTH": this used to delete every mark for the
+    // sheet and re-insert the current ones. If that delete removed nothing
+    // (a blocked or mismatched delete still reports success with zero rows
+    // affected), the re-insert added a second mark for the same student on
+    // the same date, and the old one never went away.
+    //
+    // Now each mark is UPSERTED on (enrollment, date): an existing mark for
+    // that student on that day is updated in place, never duplicated. The
+    // database enforces this with a unique rule (migration-35), so a
+    // duplicate is impossible no matter what path saves it.
     const marked = roster.filter((r) => r.status)
+    const cleared = roster.filter((r) => !r.status).map((r) => r.enrollment_id)
     if (marked.length) {
-      const { error: insertErr } = await supabase.from('attendance').insert(marked.map((r) => ({
+      const { error: upsertErr } = await supabase.from('attendance').upsert(marked.map((r) => ({
         enrollment_id: r.enrollment_id, class_date: date, status: r.status,
         present: r.status === 'present' || r.status === 'tardy',
         absence_reason: r.status === 'absent' ? (r.reason || null) : null,
-      })))
-      if (insertErr) {
-        console.error('Attendance: saving marks failed —', insertErr)
+      })), { onConflict: 'enrollment_id,class_date' })
+      if (upsertErr) {
+        console.error('Attendance: saving marks failed —', upsertErr)
         setSaving(false)
-        setSavedMsg(`Could not save: ${insertErr.message}`)
+        setSavedMsg(`Could not save: ${upsertErr.message}`)
         return
       }
     }
-    setSaving(false); setSavedMsg('Saved ✓'); setTimeout(() => setSavedMsg((m) => m === 'Saved ✓' ? '' : m), 2500)
-    // Fire-and-forget: alert checks run after save confirms, don't block the
-    // "Saved" message on email sending. Only reached once the save above is
-    // confirmed to have actually succeeded — otherwise this would compute
-    // alert counts from data that was never actually written. Each call is
-    // scoped to just this one class (currentClass, already resolved above)
-    // — not the student's other classes, which is the whole point of the fix.
-    const currentClassName = currentClass?.name || ''
-    for (const r of roster.filter((r) => r.status === 'tardy' || r.status === 'absent')) {
-      checkAlertsForEnrollment({ ...r, className: currentClassName })
+    // Only students whose mark was removed (set back to blank) need a
+    // delete now — everyone else was handled by the upsert above.
+    if (cleared.length) {
+      const { error: deleteErr } = await supabase.from('attendance').delete().eq('class_date', date).in('enrollment_id', cleared)
+      if (deleteErr) {
+        console.error('Attendance: clearing removed marks failed —', deleteErr)
+        setSaving(false)
+        setSavedMsg(`Could not save: ${deleteErr.message}`)
+        return
+      }
     }
+    setSaving(false); setSavedMsg('Saved ✓')
+    // Alert checks still run after the save confirms, so the "Saved"
+    // message never waits on email. But they are no longer silent: these
+    // used to be fire-and-forget with results only in the browser console,
+    // so from Corrie's side "no alert was due" and "the alert email failed"
+    // looked identical. The outcome now shows up next to Save.
+    const currentClassName = currentClass?.name || ''
+    const due = roster.filter((r) => r.status === 'tardy' || r.status === 'absent')
+    if (!due.length) { setTimeout(() => setSavedMsg((m) => m === 'Saved ✓' ? '' : m), 2500); return }
+    ;(async () => {
+      let sent = 0, failed = 0
+      const problems = []
+      for (const r of due) {
+        const res = await checkAlertsForEnrollment({ ...r, className: currentClassName })
+        sent += res?.sent || 0
+        failed += res?.failed || 0
+        if (res?.problems) problems.push(...res.problems)
+      }
+      if (failed) {
+        setSavedMsg(`Saved ✓ — but ${failed} attendance alert email${failed === 1 ? '' : 's'} could not be sent (${problems[0] || 'see browser console'}).`)
+      } else if (sent) {
+        setSavedMsg(`Saved ✓ — ${sent} attendance alert email${sent === 1 ? '' : 's'} sent.`)
+        setTimeout(() => setSavedMsg((m) => m.startsWith('Saved ✓ —') ? '' : m), 6000)
+      } else {
+        setTimeout(() => setSavedMsg((m) => m === 'Saved ✓' ? '' : m), 2500)
+      }
+    })()
   }
 
   // Auto-saves whatever's currently marked before switching class or date —
