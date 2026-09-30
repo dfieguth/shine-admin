@@ -42,6 +42,7 @@ export const handler = async (event) => {
     if (!check.ok) return json(401, { ok: false, error: 'Sign-in expired, refresh and try again' })
     callerId = (await check.json()).id
   } catch (e) {
+    console.error('send-test-meeting-reminder: could not verify sign-in —', e)
     return json(500, { ok: false, error: 'Could not verify sign-in' })
   }
   const admin = createClient(supabaseUrl, serviceRoleKey)

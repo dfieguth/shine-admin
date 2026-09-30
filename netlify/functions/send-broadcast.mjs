@@ -49,13 +49,47 @@ export const handler = async (event) => {
   if (!supabaseUrl || !supabaseAnonKey) {
     return json(500, { ok: false, error: 'Auth verification not configured (missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY)' })
   }
+  let callerId
   try {
     const check = await fetch(`${supabaseUrl}/auth/v1/user`, {
       headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${token}` },
     })
     if (!check.ok) return json(401, { ok: false, error: 'Sign-in expired, refresh and try again' })
-  } catch {
+    callerId = (await check.json()).id
+  } catch (e) {
+    console.error('send-broadcast: could not verify sign-in —', e)
     return json(500, { ok: false, error: 'Could not verify sign-in' })
+  }
+
+  // Being signed in is not the same as being allowed to mass-email.
+  // Restricted teacher logins only ever see Attendance in the app, but
+  // this is a public URL — a teacher's own valid token would have passed
+  // the check above and sent email to any address they wanted, through
+  // the church's Gmail account. reset-staff-password and
+  // send-test-meeting-reminder already reject teachers; this one didn't.
+  //
+  // Read with the caller's own token (not a service key) — staff_roles is
+  // readable by any signed-in staff member, so no extra credential is
+  // needed here. Fails CLOSED: if the role can't be read, the send is
+  // refused rather than allowed through.
+  try {
+    const roleRes = await fetch(`${supabaseUrl}/rest/v1/staff_roles?select=role&user_id=eq.${callerId}`, {
+      headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${token}` },
+    })
+    if (!roleRes.ok) {
+      console.error('send-broadcast: could not read caller role, refusing to send —', roleRes.status)
+      return json(500, { ok: false, error: 'Could not verify permissions' })
+    }
+    const roleRows = await roleRes.json()
+    // No row at all means a full-access account — that's the app's
+    // existing rule, kept identical here so behavior doesn't change for
+    // Corrie or any other admin login.
+    if (Array.isArray(roleRows) && roleRows[0]?.role === 'teacher') {
+      return json(403, { ok: false, error: 'Only admins can send email from Shine' })
+    }
+  } catch (e) {
+    console.error('send-broadcast: role check failed, refusing to send —', e)
+    return json(500, { ok: false, error: 'Could not verify permissions' })
   }
 
   // --- Read the message -------------------------------------------------
@@ -107,6 +141,7 @@ export const handler = async (event) => {
 
     return json(200, { ok: true, sent: emails.length })
   } catch (e) {
+    console.error('send-broadcast: send failed —', e)
     return json(500, { ok: false, error: String(e && e.message ? e.message : e) })
   }
 }
