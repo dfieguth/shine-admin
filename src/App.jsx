@@ -112,6 +112,117 @@ function localDateString(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+// Escapes text before it's written into a print window's HTML.
+//
+// Every print feature here (rosters, the active list, the door list)
+// builds an HTML string and writes it into a new window. Student and
+// parent names come from the PUBLIC registration form, so anyone on the
+// internet can put anything they like in a name field. Written in raw, a
+// name like <img src=x onerror=...> becomes live code the moment staff
+// click Print — and that window shares the admin site's origin, so it
+// could reach the signed-in session. React escapes text automatically
+// everywhere else in the app; these hand-built strings did not.
+function esc(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+// The next `count` weekly meeting dates (as M/D) for a class that meets on
+// `dayName`, starting on or after `startStr` (YYYY-MM-DD). The start date is
+// split into parts and built as a LOCAL date on purpose: parsing it as an
+// ISO string would be read as UTC and could land a day early (the same
+// timezone trap that put attendance sheets on the wrong date). Returns []
+// if the class has no recognizable weekday, so the caller can fall back to
+// blank date boxes instead of printing wrong dates.
+function classDatesFrom(dayName, startStr, count) {
+  const target = CLASS_DAY_ORDER.indexOf(dayName)
+  if (target === -1 || !startStr) return []
+  const [y, m, d] = startStr.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  const jsTarget = (target + 1) % 7 // JS getDay(): 0=Sunday; CLASS_DAY_ORDER: 0=Monday
+  dt.setDate(dt.getDate() + ((jsTarget - dt.getDay() + 7) % 7))
+  const out = []
+  for (let i = 0; i < count; i++) {
+    out.push(`${dt.getMonth() + 1}/${dt.getDate()}`)
+    dt.setDate(dt.getDate() + 7)
+  }
+  return out
+}
+
+function rosterByLastName(a, b) {
+  const an = `${a.students?.last_name || ''} ${a.students?.first_name || ''}`.trim().toLowerCase()
+  const bn = `${b.students?.last_name || ''} ${b.students?.first_name || ''}`.trim().toLowerCase()
+  return an.localeCompare(bn)
+}
+
+const ROSTER_PRINT_CSS = `
+  body{font-family:Georgia,serif;margin:24px;color:#222}
+  .cls{page-break-after:always}
+  .cls:last-child{page-break-after:auto}
+  h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 12px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{border:1px solid #999;padding:6px 8px;text-align:left;height:24px}
+  th{background:#eee;font-size:11px}
+  thead{display:table-header-group}
+  tr{page-break-inside:avoid}
+  td.n{width:26px;text-align:center;color:#777}
+  th.wk,th.io{text-align:center}
+  th.io{font-weight:600}
+  td.box{min-width:34px;height:30px;padding:0}
+  .wl{margin-top:14px;font-size:13px} .wl b{display:block;margin-bottom:4px}
+  .line{margin-top:14px;font-size:13px}
+  @media print { body{margin:10mm} }
+`
+
+// One class's printable roster section, shared by "Print roster" and
+// "Print all class rosters" so the two can never drift apart again.
+// opts.layout: 'signin' = In/Out boxes to initial for each week, with the
+//   date above each week either filled in automatically or left blank to
+//   write in; 'plain' = the original blank date columns.
+// The old "Present ✓ / Tardy T / Absent ○" key is gone from both: printed
+// rosters are now initialed by students and parents, not marked by
+// teachers, so the key only confused people.
+function rosterSectionHtml({ cls, enrolled, waitlist, priv, opts }) {
+  const showAge = !priv?.hide_student_ages
+  const showEmg = !!priv?.show_emergency_contact
+  // "Hide waitlisted students" in Privacy Settings. Waitlisted families'
+  // names have no business on a sheet that gets passed around a room.
+  const showWait = !priv?.hide_waitlist && waitlist.length > 0
+  const nm = (r) => (r.students ? esc(`${r.students.first_name} ${r.students.last_name}`) : '—')
+  const teacher = cls.teachers?.name || cls.instructor_name || ''
+  const room = cls.rooms?.name || cls.location || ''
+  const signin = opts.layout === 'signin'
+  const weeks = signin ? opts.weeks : 8
+  const dates = signin && opts.dates === 'auto' ? classDatesFrom(cls.day_of_week, opts.startDate, weeks) : []
+  const lead = (showAge ? 1 : 0) + (showEmg ? 1 : 0)
+
+  let head
+  if (signin) {
+    const wkHeads = Array.from({ length: weeks }, (_, i) => `<th class="wk" colspan="2">${dates[i] ? esc(dates[i]) : '&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;'}</th>`).join('')
+    const ioHeads = '<th class="io">In</th><th class="io">Out</th>'.repeat(weeks)
+    head = `<thead><tr><th rowspan="2"></th><th rowspan="2">Student</th>${showAge ? '<th rowspan="2">Age</th>' : ''}${showEmg ? '<th rowspan="2">Emergency</th>' : ''}${wkHeads}</tr><tr>${ioHeads}</tr></thead>`
+  } else {
+    head = `<thead><tr><th></th><th>Student</th>${showAge ? '<th>Age</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${'<th>&nbsp;/&nbsp;</th>'.repeat(weeks)}</tr></thead>`
+  }
+  const cell = signin ? '<td class="box"></td>' : '<td>&nbsp;</td>'
+  const blanks = cell.repeat(signin ? weeks * 2 : weeks)
+  const studentRows = enrolled.map((r, i) =>
+    `<tr><td class="n">${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${esc(r.students?.grade || '')}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blanks}</tr>`).join('')
+  // Two spare rows at the bottom for a late add. (The old version tried to
+  // repeat the whole row but only repeated the closing tag, which printed
+  // one malformed row instead of two.)
+  const spare = `<tr><td class="n">&nbsp;</td><td>&nbsp;</td>${'<td>&nbsp;</td>'.repeat(lead)}${blanks}</tr>`.repeat(2)
+
+  return `<section class="cls">
+    <h1>${esc(cls.name)}${cls.level ? ` — ${esc(cls.level)}` : ''}</h1>
+    <p class="sub">${esc(cls.day_of_week || '')} ${esc(cls.start_time || '')}${cls.end_time ? `–${esc(cls.end_time)}` : ''}${teacher ? ` · ${esc(teacher)}` : ''}${room ? ` · ${esc(room)}` : ''} · Printed ${new Date().toLocaleDateString()}</p>
+    <table>${head}<tbody>${studentRows}${spare}</tbody></table>
+    <p class="line">Class Helper: ______________________________ &nbsp;&nbsp; Greeter/Lobby Host: ______________________________ &nbsp;&nbsp; TA: ______________________________</p>
+    ${showWait ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
+  </section>`
+}
+
 // Every email address on a family record: primary parent, 2nd parent, and
 // the additional family member/guardian contact. Group email buttons used
 // to read only the primary `email` field, so 2nd parents and extra
@@ -1027,6 +1138,7 @@ function Students({ needsClassOnly = false } = {}) {
       .slice()
       .sort((a, b) => `${a.last_name} ${a.first_name}`.toLowerCase().localeCompare(`${b.last_name} ${b.first_name}`.toLowerCase()))
     const w = window.open('', '_blank')
+    if (!w) { alert('Your browser blocked the print window. Allow pop-ups for this site and try again.'); return }
     w.document.write(`<!doctype html><html><head><title>Active students</title><style>
       body{font-family:Georgia,serif;margin:28px;color:#222}
       h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 14px}
@@ -1038,7 +1150,7 @@ function Students({ needsClassOnly = false } = {}) {
       <h1>Active Students</h1>
       <p class="sub">${active.length} student${active.length === 1 ? '' : 's'} · Printed ${new Date().toLocaleDateString()}</p>
       <table><tr><th></th><th>Student</th><th>Grade</th><th>Family</th></tr>
-      ${active.map((s, i) => `<tr><td>${i + 1}</td><td>${s.first_name} ${s.last_name}</td><td>${s.grade || ''}</td><td>${s.families ? `${s.families.parent_first_name} ${s.families.parent_last_name}` : ''}</td></tr>`).join('')}
+      ${active.map((s, i) => `<tr><td>${i + 1}</td><td>${esc(`${s.first_name} ${s.last_name}`)}</td><td>${esc(s.grade || '')}</td><td>${s.families ? esc(`${s.families.parent_first_name} ${s.families.parent_last_name}`) : ''}</td></tr>`).join('')}
       </table>
     </body></html>`)
     w.document.close(); w.focus(); w.print()
@@ -1715,87 +1827,48 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
     if (!r.ok) setBcNote(`Could not send from Shine (${r.error}) — "Open in my email app" always works.`)
     else { setBcNote('Sent ✓'); setTimeout(() => setBroadcast(null), 1400) }
   }
-  async function printRoster() {
-    const cls = classes.find((c) => c.id === filterClass)
-    if (!cls) return
-    const { data: priv } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
-    // Alphabetized by last name, same fix as the on-screen table and
-    // printAllRosters below — this used to just follow raw load order.
-    const byLastName = (a, b) => `${a.students?.last_name || ''} ${a.students?.first_name || ''}`.trim().toLowerCase()
-      .localeCompare(`${b.students?.last_name || ''} ${b.students?.first_name || ''}`.trim().toLowerCase())
-    const enrolled = rows.filter((r) => r.class_id === filterClass && r.status === 'enrolled').slice().sort(byLastName)
-    const waitlist = rows.filter((r) => r.class_id === filterClass && r.status === 'waitlist').slice().sort(byLastName)
-    const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
-    const dateCols = 8
-    const blank = '<td>&nbsp;</td>'.repeat(dateCols)
-    const showAge = !priv?.hide_student_ages
-    const showEmg = !!priv?.show_emergency_contact
+  // Roster print options, asked for each time you print. 'one' = the class
+  // currently filtered, 'all' = every class.
+  const [printAsk, setPrintAsk] = useState(null)
+  const [printOpts, setPrintOpts] = useState(() => ({ layout: 'signin', weeks: 4, dates: 'auto', startDate: localDateString() }))
+  // Loads the privacy settings a printout depends on. If they can't be
+  // read, the print is REFUSED rather than going ahead with defaults: the
+  // defaults show ages and the waitlist, so a failed load would have
+  // printed exactly the details the settings are there to hide.
+  async function loadPrivacyForPrint() {
+    const { data, error } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
+    if (error || !data) {
+      console.error('Roster print: could not load privacy settings —', error)
+      alert('Could not load the privacy settings, so nothing was printed (printing without them could show details you have chosen to hide). Please try again.')
+      return null
+    }
+    return data
+  }
+  function openPrintWindow(title, bodyHtml, landscape) {
     const w = window.open('', '_blank')
-    w.document.write(`<!doctype html><html><head><title>${cls.name} roster</title><style>
-      body{font-family:Georgia,serif;margin:28px;color:#222}
-      h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 4px}
-      .legend{font-size:12px;margin:8px 0 14px}
-      table{width:100%;border-collapse:collapse;font-size:13px}
-      th,td{border:1px solid #999;padding:7px 8px;text-align:left;height:22px}
-      th{background:#eee;font-size:11px} td:first-child{width:26px;text-align:center;color:#777}
-      .wl{margin-top:18px;font-size:13px} .wl b{display:block;margin-bottom:4px}
-      .line{margin-top:16px;font-size:13px}
-      @media print { body{margin:10mm} }
-    </style></head><body>
-      <h1>${cls.name}${cls.level ? ` — ${cls.level}` : ''}</h1>
-      <p class="sub">${cls.day_of_week || ''} ${cls.start_time || ''}${cls.end_time ? `–${cls.end_time}` : ''}${cls.instructor_name ? ` · ${cls.instructor_name}` : ''} · Printed ${new Date().toLocaleDateString()}</p>
-      <p class="legend">Present: ✓ &nbsp;&nbsp; Tardy: T &nbsp;&nbsp; Absent: ○</p>
-      <table><tr><th></th><th>Student</th>${showAge ? '<th>Age</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${'<th>&nbsp;/&nbsp;</th>'.repeat(dateCols)}</tr>
-      ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${r.students?.grade || ''}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blank}</tr>`).join('')}
-      ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + (showAge ? '<td>&nbsp;</td>' : '') + (showEmg ? '<td>&nbsp;</td>' : '') + blank + '</tr>'.repeat(2)}
-      </table>
-      <p class="line">Class Helper: ______________________________ &nbsp;&nbsp; Greeter/Lobby Host: ______________________________ &nbsp;&nbsp; TA: ______________________________</p>
-      ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
-    </body></html>`)
+    if (!w) { alert('Your browser blocked the print window. Allow pop-ups for this site and try again.'); return }
+    w.document.write(`<!doctype html><html><head><title>${esc(title)}</title><style>${ROSTER_PRINT_CSS}${landscape ? '@page{size:landscape}' : ''}</style></head><body>${bodyHtml}</body></html>`)
     w.document.close(); w.focus(); w.print()
   }
-  async function printAllRosters() {
-    const { data: priv } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
-    const showAge = !priv?.hide_student_ages
-    const showEmg = !!priv?.show_emergency_contact
-    const dateCols = 8
-    const blank = '<td>&nbsp;</td>'.repeat(dateCols)
+  async function printRoster(opts) {
+    const cls = classes.find((c) => c.id === filterClass)
+    if (!cls) return
+    const priv = await loadPrivacyForPrint()
+    if (!priv) return
+    const enrolled = rows.filter((r) => r.class_id === filterClass && r.status === 'enrolled').slice().sort(rosterByLastName)
+    const waitlist = rows.filter((r) => r.class_id === filterClass && r.status === 'waitlist').slice().sort(rosterByLastName)
+    openPrintWindow(`${cls.name} roster`, rosterSectionHtml({ cls, enrolled, waitlist, priv, opts }), opts.layout === 'signin')
+  }
+  async function printAllRosters(opts) {
+    const priv = await loadPrivacyForPrint()
+    if (!priv) return
     const activeClasses = classes.slice().sort((x, y) => (x.day_of_week || '').localeCompare(y.day_of_week || ''))
-    const byLastName = (a, b) => `${a.students?.last_name || ''} ${a.students?.first_name || ''}`.trim().toLowerCase()
-      .localeCompare(`${b.students?.last_name || ''} ${b.students?.first_name || ''}`.trim().toLowerCase())
     const sections = activeClasses.map((cls) => {
-      const enrolled = rows.filter((r) => r.class_id === cls.id && r.status === 'enrolled').slice().sort(byLastName)
-      const waitlist = rows.filter((r) => r.class_id === cls.id && r.status === 'waitlist').slice().sort(byLastName)
-      const nm = (r) => r.students ? `${r.students.first_name} ${r.students.last_name}` : '—'
-      const teacher = cls.teachers?.name || cls.instructor_name || ''
-      const room = cls.rooms?.name || cls.location || ''
-      return `<section class="cls">
-        <h1>${cls.name}${cls.level ? ` — ${cls.level}` : ''}</h1>
-        <p class="sub">${cls.day_of_week || ''} ${cls.start_time || ''}${cls.end_time ? `–${cls.end_time}` : ''}${teacher ? ` · ${teacher}` : ''}${room ? ` · ${room}` : ''}</p>
-        <p class="legend">Present: ✓ &nbsp; Tardy: T &nbsp; Absent: ○</p>
-        <table><tr><th></th><th>Student</th>${showAge ? '<th>Age</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${'<th>&nbsp;/&nbsp;</th>'.repeat(dateCols)}</tr>
-        ${enrolled.map((r, i) => `<tr><td>${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${r.students?.grade || ''}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blank}</tr>`).join('')}
-        ${'<tr><td>&nbsp;</td><td>&nbsp;</td>' + (showAge ? '<td>&nbsp;</td>' : '') + (showEmg ? '<td>&nbsp;</td>' : '') + blank + '</tr>'.repeat(2)}
-        </table>
-        <p class="line">Class Helper: ______________________________ &nbsp;&nbsp; Greeter/Lobby Host: ______________________________ &nbsp;&nbsp; TA: ______________________________</p>
-        ${waitlist.length ? `<div class="wl"><b>Waitlist</b>${waitlist.map(nm).join('<br>')}</div>` : ''}
-      </section>`
+      const enrolled = rows.filter((r) => r.class_id === cls.id && r.status === 'enrolled').slice().sort(rosterByLastName)
+      const waitlist = rows.filter((r) => r.class_id === cls.id && r.status === 'waitlist').slice().sort(rosterByLastName)
+      return rosterSectionHtml({ cls, enrolled, waitlist, priv, opts })
     }).join('')
-    const w = window.open('', '_blank')
-    w.document.write(`<!doctype html><html><head><title>All class rosters</title><style>
-      body{font-family:Georgia,serif;margin:24px;color:#222}
-      .cls{page-break-after:always}
-      .cls:last-child{page-break-after:auto}
-      h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 4px}
-      .legend{font-size:12px;margin:8px 0 12px}
-      table{width:100%;border-collapse:collapse;font-size:13px}
-      th,td{border:1px solid #999;padding:6px 8px;text-align:left;height:22px}
-      th{background:#eee;font-size:11px} td:first-child{width:26px;text-align:center;color:#777}
-      .wl{margin-top:14px;font-size:13px} .wl b{display:block;margin-bottom:4px}
-      .line{margin-top:14px;font-size:13px}
-      @media print { body{margin:10mm} }
-    </style></head><body>${sections}</body></html>`)
-    w.document.close(); w.focus(); w.print()
+    openPrintWindow('All class rosters', sections, opts.layout === 'signin')
   }
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = rows
@@ -1831,7 +1904,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
           <option value="dropped">Dropped only</option>
         </select>
         {filterClass && <button className="btn ghost small" onClick={copyEmails}>{copied || 'Copy parent emails'}</button>}
-        {filterClass && <button className="btn ghost small" onClick={printRoster}>Print roster</button>}
+        {filterClass && <button className="btn ghost small" onClick={() => setPrintAsk('one')}>Print roster</button>}
         {filterClass && <button className="btn ghost small" onClick={openBroadcast}>Email class</button>}
         <div className="spacer" />
         <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{filtered.length} {statusFilter || 'total'}{statusFilter ? '' : ' enrollment'}{filtered.length !== 1 && !statusFilter ? 's' : ''}</span>
@@ -1853,7 +1926,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
         {groupBy && groupValue && <button className="btn ghost small" onClick={copyGroupEmails}>{groupCopied || 'Copy these emails'}</button>}
         {groupBy && groupValue && <button className="btn" onClick={openGroupBroadcast}>Email this group</button>}
         <div className="spacer" />
-        <button className="btn ghost small" onClick={printAllRosters}>Print all class rosters</button>
+        <button className="btn ghost small" onClick={() => setPrintAsk('all')}>Print all class rosters</button>
       </div>
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No enrollments here</h3><p>Enroll a student to get started.</p></div></div>
@@ -1891,6 +1964,49 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
             )})}
           </tbody>
         </table></div>
+      )}
+      {printAsk && (
+        <Modal
+          title={printAsk === 'one' ? 'Print roster' : 'Print all class rosters'}
+          onClose={() => setPrintAsk(null)}
+          onSave={() => { const which = printAsk; setPrintAsk(null); if (which === 'one') printRoster(printOpts); else printAllRosters(printOpts) }}
+          saveLabel="Print"
+        >
+          <div className="field">
+            <label>Layout</label>
+            <select value={printOpts.layout} onChange={(e) => setPrintOpts({ ...printOpts, layout: e.target.value })}>
+              <option value="signin">Sign-in sheet — In and Out boxes to initial each week</option>
+              <option value="plain">Plain roster — blank date columns</option>
+            </select>
+          </div>
+          {printOpts.layout === 'signin' && (
+            <>
+              <div className="field row2">
+                <div className="field">
+                  <label>Weeks on the sheet</label>
+                  <select value={printOpts.weeks} onChange={(e) => setPrintOpts({ ...printOpts, weeks: Number(e.target.value) })}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} week{n === 1 ? '' : 's'}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Dates above each week</label>
+                  <select value={printOpts.dates} onChange={(e) => setPrintOpts({ ...printOpts, dates: e.target.value })}>
+                    <option value="auto">Fill in class dates automatically</option>
+                    <option value="blank">Leave blank to write in</option>
+                  </select>
+                </div>
+              </div>
+              {printOpts.dates === 'auto' && (
+                <>
+                  <Field label="First week on or after" type="date" value={printOpts.startDate} onChange={(e) => setPrintOpts({ ...printOpts, startDate: e.target.value })} />
+                  <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6 }}>
+                    Each class counts forward from this date on its own meeting day. Dates run every week without skipping, so for a week with no class (a holiday, say), choose "Leave blank to write in" instead.
+                  </p>
+                </>
+              )}
+            </>
+          )}
+        </Modal>
       )}
       {broadcast && (
         <div className="overlay" onClick={() => setBroadcast(null)}>
@@ -4232,6 +4348,7 @@ function RecitalReservationsTab() {
     const showName = showFilter ? (shows.find((s) => s.id === showFilter)?.name || '') : 'All shows'
     const totalTickets = sorted.reduce((sum, r) => sum + r.ticket_count, 0)
     const w = window.open('', '_blank')
+    if (!w) { alert('Your browser blocked the print window. Allow pop-ups for this site and try again.'); return }
     w.document.write(`<!doctype html><html><head><title>Door list</title><style>
       body{font-family:Georgia,serif;margin:26px;color:#222}
       h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 14px}
@@ -4241,10 +4358,10 @@ function RecitalReservationsTab() {
       .box{width:34px;text-align:center}
       @media print { body{margin:10mm} }
     </style></head><body>
-      <h1>Door Check-In — ${showName}</h1>
+      <h1>Door Check-In — ${esc(showName)}</h1>
       <p class="sub">${sorted.length} ${sorted.length === 1 ? 'family' : 'families'} · ${totalTickets} ticket${totalTickets === 1 ? '' : 's'} · Printed ${new Date().toLocaleDateString()}</p>
       <table><tr><th class="box">✓</th><th>Family</th><th>Dancer</th><th>Tickets</th>${showFilter ? '' : '<th>Show</th>'}</tr>
-      ${sorted.map((r) => `<tr><td class="box"></td><td>${r.parent_name || ''}</td><td>${r.student_name || ''}</td><td>${r.ticket_count}</td>${showFilter ? '' : `<td>${r.recital_shows?.name || ''}</td>`}</tr>`).join('')}
+      ${sorted.map((r) => `<tr><td class="box"></td><td>${esc(r.parent_name || '')}</td><td>${esc(r.student_name || '')}</td><td>${Number(r.ticket_count) || 0}</td>${showFilter ? '' : `<td>${esc(r.recital_shows?.name || '')}</td>`}</tr>`).join('')}
       </table>
     </body></html>`)
     w.document.close(); w.focus(); w.print()
@@ -4338,6 +4455,7 @@ function PrivacySettings() {
     ['show_emergency_contact', 'Show emergency contact info', 'Include emergency contact name/phone on printed rosters.'],
     ['show_medical_info', 'Show medical info on rosters', 'Include each student\'s medical/allergy notes on printed rosters. Off by default — most classes don\'t need this printed.'],
     ['hide_student_ages', 'Hide student ages', 'Hides age from printed rosters and class lists.'],
+    ['hide_waitlist', 'Hide waitlisted students', 'Leaves the waitlist off printed class rosters. Waitlisted students still show on screen in Enrollments.'],
     ['show_teacher_names', 'Show teacher names', 'Show the assigned instructor on the public schedule and printed rosters.'],
   ]
   return (
