@@ -167,6 +167,7 @@ const ROSTER_PRINT_CSS = `
   thead{display:table-header-group}
   tr{page-break-inside:avoid}
   td.n{width:26px;text-align:center;color:#777}
+  th.x,td.x{font-size:11px;max-width:110px;overflow-wrap:anywhere}
   th.wk,th.io{text-align:center}
   th.io{font-weight:600}
   td.box{min-width:34px;height:30px;padding:0}
@@ -195,20 +196,24 @@ function rosterSectionHtml({ cls, enrolled, waitlist, priv, opts }) {
   const signin = opts.layout === 'signin'
   const weeks = signin ? opts.weeks : 8
   const dates = signin && opts.dates === 'auto' ? classDatesFrom(cls.day_of_week, opts.startDate, weeks) : []
-  const lead = (showAge ? 1 : 0) + (showEmg ? 1 : 0)
+  // Optional extra columns picked in the print dialog (sizes, contacts…),
+  // filtered through Privacy Settings. Cell text is escaped like names are.
+  const extras = resolvePrintFields(opts.extraFields, priv, 'roster')
+  const lead = (showAge ? 1 : 0) + (showEmg ? 1 : 0) + extras.length
+  const exHead = (rowspan) => extras.map((f) => `<th class="x"${rowspan ? ' rowspan="2"' : ''}>${esc(f.label)}</th>`).join('')
 
   let head
   if (signin) {
     const wkHeads = Array.from({ length: weeks }, (_, i) => `<th class="wk" colspan="2">${dates[i] ? esc(dates[i]) : '&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;'}</th>`).join('')
     const ioHeads = '<th class="io">In</th><th class="io">Out</th>'.repeat(weeks)
-    head = `<thead><tr><th rowspan="2"></th><th rowspan="2">Student</th>${showAge ? '<th rowspan="2">Age</th>' : ''}${showEmg ? '<th rowspan="2">Emergency</th>' : ''}${wkHeads}</tr><tr>${ioHeads}</tr></thead>`
+    head = `<thead><tr><th rowspan="2"></th><th rowspan="2">Student</th>${showAge ? '<th rowspan="2">Grade</th>' : ''}${showEmg ? '<th rowspan="2">Emergency</th>' : ''}${exHead(true)}${wkHeads}</tr><tr>${ioHeads}</tr></thead>`
   } else {
-    head = `<thead><tr><th></th><th>Student</th>${showAge ? '<th>Age</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${'<th>&nbsp;/&nbsp;</th>'.repeat(weeks)}</tr></thead>`
+    head = `<thead><tr><th></th><th>Student</th>${showAge ? '<th>Grade</th>' : ''}${showEmg ? '<th>Emergency</th>' : ''}${exHead(false)}${'<th>&nbsp;/&nbsp;</th>'.repeat(weeks)}</tr></thead>`
   }
   const cell = signin ? '<td class="box"></td>' : '<td>&nbsp;</td>'
   const blanks = cell.repeat(signin ? weeks * 2 : weeks)
   const studentRows = enrolled.map((r, i) =>
-    `<tr><td class="n">${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${esc(r.students?.grade || '')}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${blanks}</tr>`).join('')
+    `<tr><td class="n">${i + 1}</td><td>${nm(r)}</td>${showAge ? `<td>${esc(r.students?.grade || '')}</td>` : ''}${showEmg ? '<td>&nbsp;</td>' : ''}${extras.map((f) => `<td class="x">${esc(f.get(r.students || {}) || '')}</td>`).join('')}${blanks}</tr>`).join('')
   // Two spare rows at the bottom for a late add. (The old version tried to
   // repeat the whole row but only repeated the closing tag, which printed
   // one malformed row instead of two.)
@@ -233,6 +238,172 @@ function familyEmails(fam) {
   return [fam.email, fam.secondary_parent_email, fam.tertiary_parent_email]
     .map((e) => (e || '').trim())
     .filter(Boolean)
+}
+
+// ---------------------------------------------------------------------
+// Optional "extra info" columns for printed rosters, the printed student
+// list, and the copy / Excel export. One catalog drives all three so the
+// checkboxes, the printout and the spreadsheet can never disagree.
+//
+// `priv` ties a field to a Privacy Settings switch. Anything printed or
+// exported honors those switches, so a setting like "Hide parent phone
+// number" can't be bypassed by ticking a box here. `listOnly` fields are
+// offered for the student list but not class rosters (they only make sense
+// across students). Rosters already have a built-in Grade column, so the
+// roster picker leaves Grade out rather than printing it twice.
+const PRINT_FIELD_GROUPS = [
+  { title: 'Student', fields: [
+    { key: 'grade', label: 'Grade', priv: 'ages', get: (s) => s.grade },
+    { key: 'age', label: 'Age', priv: 'ages', get: (s) => s.age },
+    { key: 'family', label: 'Family (parent name)', get: (s) => s.families ? `${s.families.parent_first_name || ''} ${s.families.parent_last_name || ''}`.trim() : '' },
+    { key: 'classes', label: 'Classes enrolled in', listOnly: true, get: (s, ctx) => ((ctx?.classes || {})[s.id] || []).join(', ') },
+    { key: 'status', label: 'Season status', listOnly: true, get: (s) => s.season_status || 'active' },
+    { key: 'registered', label: 'Registered on', listOnly: true, get: (s) => s.registered_at ? new Date(s.registered_at).toLocaleDateString() : '' },
+    { key: 'medical', label: 'Medical / allergies', priv: 'medical', get: (s) => s.medical_notes },
+  ] },
+  { title: 'Sizes & measurements', fields: [
+    { key: 'size_tshirt', label: 'T-shirt size', get: (s) => s.size_tshirt },
+    { key: 'size_leotard', label: 'Leotard size', get: (s) => s.size_leotard },
+    { key: 'size_dress', label: 'Dress size', get: (s) => s.size_dress },
+    { key: 'size_shoe', label: 'Shoe size', get: (s) => s.size_shoe },
+    { key: 'size_girth', label: 'Girth', get: (s) => s.size_girth },
+    { key: 'size_height', label: 'Height', get: (s) => s.size_height },
+    { key: 'size_waist', label: 'Waist', get: (s) => s.size_waist },
+    { key: 'size_bust', label: 'Bust', get: (s) => s.size_bust },
+    { key: 'size_hips', label: 'Hips', get: (s) => s.size_hips },
+    { key: 'size_inseam', label: 'Inseam', get: (s) => s.size_inseam },
+    { key: 'size_measured_on', label: 'Last measured', get: (s) => s.size_measured_on },
+    { key: 'size_notes', label: 'Size notes', get: (s) => s.size_notes },
+  ] },
+  { title: 'Family contact', fields: [
+    { key: 'parent_phone', label: 'Parent phone', priv: 'phone', get: (s) => s.families?.phone },
+    { key: 'parent_email', label: 'Parent email', get: (s) => s.families?.email },
+    { key: 'parent2', label: '2nd parent (name, phone, email)', priv: 'phone', get: (s) => { const f = s.families; return f ? [f.secondary_parent_name, f.secondary_parent_phone, f.secondary_parent_email].filter(Boolean).join(' · ') : '' } },
+    { key: 'parent3', label: 'Additional contact (name, phone, email)', priv: 'phone', get: (s) => { const f = s.families; return f ? [f.tertiary_parent_name, f.tertiary_parent_phone, f.tertiary_parent_email].filter(Boolean).join(' · ') : '' } },
+    { key: 'emergency', label: 'Emergency contact (name, phone)', priv: 'emergency', get: (s) => { const f = s.families; return f ? [f.emergency_contact_name, f.emergency_contact_phone].filter(Boolean).join(' · ') : '' } },
+  ] },
+]
+const PRINT_FIELDS_ALL = PRINT_FIELD_GROUPS.flatMap((g) => g.fields)
+const PRINT_FIELD_KEYS = new Set(PRINT_FIELDS_ALL.map((f) => f.key))
+
+// Why a field is switched off by Privacy Settings, or '' if it is allowed.
+// With no settings loaded (null) nothing is blocked here — every printing
+// path loads the settings itself first and refuses to print without them.
+function printFieldBlockedReason(f, priv) {
+  if (!priv || !f.priv) return ''
+  if (f.priv === 'ages' && priv.hide_student_ages) return 'hidden by "Hide student ages"'
+  if (f.priv === 'phone' && priv.hide_parent_phone) return 'hidden by "Hide parent phone number"'
+  if (f.priv === 'emergency' && !priv.show_emergency_contact) return 'off in "Show emergency contact info"'
+  if (f.priv === 'medical' && !priv.show_medical_info) return 'off in "Show medical info on rosters"'
+  return ''
+}
+
+// Selected keys -> the fields that will really appear, in catalog order.
+function resolvePrintFields(keys, priv, context) {
+  const want = new Set(keys || [])
+  return PRINT_FIELDS_ALL.filter((f) => want.has(f.key)
+    && !printFieldBlockedReason(f, priv)
+    && !(context === 'roster' && (f.listOnly || f.key === 'grade')))
+}
+
+// Remembers each picker's ticks in this browser, so the boxes stay the way
+// Corrie last set them. Browser storage can be unavailable (private
+// windows), so every read and write is wrapped and the page works without.
+function usePrintFields(storeKey, defaults) {
+  const [sel, setSel] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(storeKey))
+      if (Array.isArray(v)) return v.filter((k) => PRINT_FIELD_KEYS.has(k))
+    } catch { /* fall through to defaults */ }
+    return defaults
+  })
+  function set(next) {
+    setSel(next)
+    try { localStorage.setItem(storeKey, JSON.stringify(next)) } catch { /* not saved, still works */ }
+  }
+  return [sel, set]
+}
+
+// Privacy settings for the picker's "switched off" notes. Display only: the
+// real enforcement happens again at print / export time.
+function usePrivacyForPicker(active) {
+  const [priv, setPriv] = useState(null)
+  useEffect(() => {
+    if (!active) return
+    let live = true
+    supabase.from('privacy_settings').select('*').eq('id', 1).single().then(({ data }) => { if (live) setPriv(data || null) })
+    return () => { live = false }
+  }, [active])
+  return priv
+}
+
+function PrintFieldPicker({ context, selected, onChange, priv }) {
+  const groups = PRINT_FIELD_GROUPS
+    .map((g) => ({ ...g, fields: g.fields.filter((f) => !(context === 'roster' && (f.listOnly || f.key === 'grade'))) }))
+    .filter((g) => g.fields.length)
+  const toggle = (k) => onChange(selected.includes(k) ? selected.filter((x) => x !== k) : [...selected, k])
+  function setGroup(g, on) {
+    const keys = g.fields.filter((f) => !printFieldBlockedReason(f, priv)).map((f) => f.key)
+    onChange(on ? [...new Set([...selected, ...keys])] : selected.filter((k) => !keys.includes(k)))
+  }
+  const linkBtn = { background: 'none', border: 'none', padding: 0, color: 'var(--brass-dark, #a3741f)', cursor: 'pointer', fontSize: 12.5 }
+  return (
+    <div style={{ marginTop: 6 }}>
+      <p style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '.04em', color: 'var(--brass-dark, #a3741f)', fontWeight: 600, margin: '14px 0 4px' }}>Extra columns to include</p>
+      <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 6px' }}>
+        Tick what you need — your choices are remembered. Anything marked off here is switched off in Privacy Settings.
+      </p>
+      {groups.map((g) => (
+        <div key={g.title} style={{ marginTop: 10 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline' }}>
+            <strong style={{ fontSize: 13 }}>{g.title}</strong>
+            <button type="button" style={linkBtn} onClick={() => setGroup(g, true)}>all</button>
+            <button type="button" style={linkBtn} onClick={() => setGroup(g, false)}>none</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '4px 14px', marginTop: 4 }}>
+            {g.fields.map((f) => {
+              const blocked = printFieldBlockedReason(f, priv)
+              return (
+                <label key={f.key} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13.5, cursor: blocked ? 'not-allowed' : 'pointer', opacity: blocked ? 0.55 : 1 }}>
+                  <input type="checkbox" disabled={!!blocked} checked={!blocked && selected.includes(f.key)} onChange={() => toggle(f.key)} style={{ marginTop: 3 }} />
+                  <span>{f.label}{blocked && <><br /><span style={{ fontSize: 11.5, color: 'var(--ink-soft)' }}>{blocked}</span></>}</span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+      {context === 'roster' && (
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: 12 }}>
+          Printed rosters get passed around a room — only tick contact details you are comfortable with everyone seeing.
+        </p>
+      )}
+    </div>
+  )
+}
+
+// Spreadsheet-safe text. Names and notes come from public forms, and a
+// cell that starts with = or @ is run as a formula when the file or the
+// pasted text is opened in Excel, so those get a leading apostrophe.
+// Phone numbers like "+1 (555) 123-4567" are left alone.
+function sheetText(v) {
+  let s = String(v ?? '').replace(/[\r\n\t]+/g, ' ').trim()
+  if (/^[=@]/.test(s) || (/^[+-]/.test(s) && !/^[+-][\d\s().-]*$/.test(s))) s = `'${s}`
+  return s
+}
+function toCsv(headers, rows) {
+  const q = (v) => `"${sheetText(v).replace(/"/g, '""')}"`
+  return '﻿' + [headers, ...rows].map((r) => r.map(q).join(',')).join('\r\n') + '\r\n'
+}
+function toTsv(headers, rows) {
+  return [headers, ...rows].map((r) => r.map(sheetText).join('\t')).join('\n')
+}
+function downloadTextFile(filename, text, mime) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }))
+  const a = document.createElement('a')
+  a.href = url; a.download = filename
+  document.body.appendChild(a); a.click(); a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function applySort(rows, sort, getters) {
@@ -1128,32 +1299,83 @@ function Students({ needsClassOnly = false } = {}) {
     load()
   }
 
-  // A plain, alphabetized print list of every currently Active student —
-  // deliberately NOT a class roster (no check-boxes, no per-class
-  // grouping, no attendance columns). Same new-window print pattern
-  // already used for class rosters, for a consistent feel.
-  function printActiveList() {
-    const active = rows
-      .filter((s) => (s.season_status || 'active') === 'active')
-      .slice()
-      .sort((a, b) => `${a.last_name} ${a.first_name}`.toLowerCase().localeCompare(`${b.last_name} ${b.first_name}`.toLowerCase()))
+  // Print / copy / export the student list with whatever columns are ticked.
+  // One alphabetized list of students (NOT grouped by class). Scope is
+  // chosen in the dialog; the columns come from the shared catalog, and
+  // Privacy Settings are applied at the moment of printing or exporting.
+  const [listAsk, setListAsk] = useState(false)
+  const [listScope, setListScope] = useState('active')
+  const [listFields, setListFields] = usePrintFields('shine_print_fields_list', ['grade', 'family'])
+  const [listNote, setListNote] = useState('')
+  const listPriv = usePrivacyForPicker(listAsk)
+  function listScopeRows() {
+    let r = rows
+    if (listScope === 'active') r = rows.filter((s) => (s.season_status || 'active') === 'active')
+    else if (listScope === 'shown') r = filtered
+    else if (listScope === 'selected') r = rows.filter((s) => selectedIds.has(s.id))
+    return r.slice().sort((a, b) => `${a.last_name} ${a.first_name}`.toLowerCase().localeCompare(`${b.last_name} ${b.first_name}`.toLowerCase()))
+  }
+  // Same privacy guard the roster print uses: if the settings can't be
+  // read, nothing is produced rather than guessing.
+  async function buildList() {
+    const { data: priv, error } = await supabase.from('privacy_settings').select('*').eq('id', 1).single()
+    if (error || !priv) {
+      console.error('Student list: could not load privacy settings —', error)
+      alert('Could not load the privacy settings, so nothing was produced (it could show details you have chosen to hide). Please try again.')
+      return null
+    }
+    const fields = resolvePrintFields(listFields, priv, 'list')
+    const list = listScopeRows()
+    return { fields, list, ctx: { classes: enrollMap } }
+  }
+  function flashListNote(msg) { setListNote(msg); setTimeout(() => setListNote(''), 3500) }
+  async function printStudentList() {
+    const b = await buildList(); if (!b) return
+    const { fields, list, ctx } = b
+    const wide = fields.length > 5
     const w = window.open('', '_blank')
     if (!w) { alert('Your browser blocked the print window. Allow pop-ups for this site and try again.'); return }
-    w.document.write(`<!doctype html><html><head><title>Active students</title><style>
+    w.document.write(`<!doctype html><html><head><title>Student list</title><style>
       body{font-family:Georgia,serif;margin:28px;color:#222}
       h1{font-size:19px;margin:0 0 2px} .sub{font-size:13px;color:#555;margin:0 0 14px}
-      table{width:100%;border-collapse:collapse;font-size:13px}
-      th,td{border:1px solid #999;padding:7px 8px;text-align:left}
+      table{width:100%;border-collapse:collapse;font-size:${wide ? 11.5 : 13}px}
+      th,td{border:1px solid #999;padding:${wide ? 5 : 7}px 7px;text-align:left;overflow-wrap:anywhere;vertical-align:top}
       th{background:#eee;font-size:11px} td:first-child{width:34px;text-align:center;color:#777}
+      thead{display:table-header-group} tr{page-break-inside:avoid}
+      @page{size:${fields.length > 7 ? 'landscape' : 'portrait'}}
       @media print { body{margin:10mm} }
     </style></head><body>
-      <h1>Active Students</h1>
-      <p class="sub">${active.length} student${active.length === 1 ? '' : 's'} · Printed ${new Date().toLocaleDateString()}</p>
-      <table><tr><th></th><th>Student</th><th>Grade</th><th>Family</th></tr>
-      ${active.map((s, i) => `<tr><td>${i + 1}</td><td>${esc(`${s.first_name} ${s.last_name}`)}</td><td>${esc(s.grade || '')}</td><td>${s.families ? esc(`${s.families.parent_first_name} ${s.families.parent_last_name}`) : ''}</td></tr>`).join('')}
-      </table>
+      <h1>Students</h1>
+      <p class="sub">${list.length} student${list.length === 1 ? '' : 's'} · alphabetical by last name · Printed ${new Date().toLocaleDateString()}</p>
+      <table><thead><tr><th></th><th>Student</th>${fields.map((f) => `<th>${esc(f.label)}</th>`).join('')}</tr></thead><tbody>
+      ${list.map((s, i) => `<tr><td>${i + 1}</td><td>${esc(`${s.first_name} ${s.last_name}`)}</td>${fields.map((f) => `<td>${esc(f.get(s, ctx) || '')}</td>`).join('')}</tr>`).join('')}
+      </tbody></table>
     </body></html>`)
     w.document.close(); w.focus(); w.print()
+  }
+  // Spreadsheet columns: last and first name split so it sorts and filters
+  // properly in Excel, then the ticked fields.
+  function listTable(b) {
+    const headers = ['Last name', 'First name', ...b.fields.map((f) => f.label)]
+    const data = b.list.map((s) => [s.last_name, s.first_name, ...b.fields.map((f) => f.get(s, b.ctx) || '')])
+    return { headers, data }
+  }
+  async function copyStudentList() {
+    const b = await buildList(); if (!b) return
+    const { headers, data } = listTable(b)
+    try {
+      await navigator.clipboard.writeText(toTsv(headers, data))
+      flashListNote(`Copied ${data.length} student${data.length === 1 ? '' : 's'} ✓ — paste into Excel or Google Sheets`)
+    } catch (e) {
+      console.error('Student list: copy failed —', e)
+      flashListNote('Could not copy — your browser blocked it. Try "Download for Excel" instead.')
+    }
+  }
+  async function downloadStudentList() {
+    const b = await buildList(); if (!b) return
+    const { headers, data } = listTable(b)
+    downloadTextFile(`shine-students-${localDateString()}.csv`, toCsv(headers, data), 'text/csv;charset=utf-8')
+    flashListNote(`Downloaded ${data.length} student${data.length === 1 ? '' : 's'} ✓ — opens in Excel`)
   }
 
   const [confirmDelete, setConfirmDelete] = useState(null)
@@ -1414,7 +1636,7 @@ function Students({ needsClassOnly = false } = {}) {
               <option value="all">All students</option>
             </select>
             <button className="btn ghost small" onClick={selectAllInactive}>Select all Inactive</button>
-            <button className="btn ghost small" onClick={printActiveList}>Print Active List</button>
+            <button className="btn ghost small" onClick={() => setListAsk(true)}>Print / Export list</button>
           </>
         )}
         {selectedIds.size > 0 && (
@@ -1587,6 +1809,32 @@ function Students({ needsClassOnly = false } = {}) {
           )}
         </Modal>
       )}
+      {listAsk && (
+        <Modal title="Print / export student list" onClose={() => setListAsk(false)} onSave={() => { setListAsk(false); printStudentList() }} saveLabel="Print">
+          <div className="field">
+            <label>Which students</label>
+            <select value={listScope} onChange={(e) => setListScope(e.target.value)}>
+              <option value="active">Active students ({rows.filter((s) => (s.season_status || 'active') === 'active').length})</option>
+              <option value="all">Everyone, including inactive ({rows.length})</option>
+              <option value="shown">Whatever the table is showing now ({filtered.length})</option>
+              <option value="selected" disabled={selectedIds.size === 0}>Only the students I ticked ({selectedIds.size})</option>
+            </select>
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '-4px 0 0' }}>One list, alphabetical by last name — not split up by class.</p>
+          <PrintFieldPicker context="list" selected={listFields} onChange={setListFields} priv={listPriv} />
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+            <p style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '.04em', color: 'var(--brass-dark, #a3741f)', fontWeight: 600, margin: '0 0 8px' }}>Or take the same list with you</p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button type="button" className="btn ghost small" onClick={copyStudentList}>Copy list</button>
+              <button type="button" className="btn ghost small" onClick={downloadStudentList}>Download for Excel (.csv)</button>
+              {listNote && <span style={{ fontSize: 13, color: listNote.startsWith('Could not') ? '#b23838' : 'var(--ok)', fontWeight: 500 }}>{listNote}</span>}
+            </div>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '8px 0 0' }}>
+              Copy pastes straight into Excel or Google Sheets. The download is a .csv file, which Excel opens as a normal spreadsheet. Both use the same columns ticked above, with last and first name in separate columns.
+            </p>
+          </div>
+        </Modal>
+      )}
       {confirmDelete && (
         <div className="overlay" onClick={() => setConfirmDelete(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1733,7 +1981,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   }, [initialClassFilter])
   const load = useCallback(async () => {
     const [e, s, c] = await Promise.all([
-      supabase.from('enrollments').select('*, students(first_name, last_name, grade), classes(name, day_of_week)').order('created_at', { ascending: false }),
+      supabase.from('enrollments').select('*, students(*, families(*)), classes(name, day_of_week)').order('created_at', { ascending: false }),
       supabase.from('students').select('id, first_name, last_name').order('last_name'),
       supabase.from('classes').select('id, name, capacity, day_of_week, start_time, end_time, instructor_name, level').eq('active', true).order('name'),
     ])
@@ -1831,6 +2079,8 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   // currently filtered, 'all' = every class.
   const [printAsk, setPrintAsk] = useState(null)
   const [printOpts, setPrintOpts] = useState(() => ({ layout: 'signin', weeks: 4, dates: 'auto', startDate: localDateString() }))
+  const [rosterFields, setRosterFields] = usePrintFields('shine_print_fields_roster', [])
+  const rosterPriv = usePrivacyForPicker(!!printAsk)
   // Loads the privacy settings a printout depends on. If they can't be
   // read, the print is REFUSED rather than going ahead with defaults: the
   // defaults show ages and the waitlist, so a failed load would have
@@ -1969,7 +2219,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
         <Modal
           title={printAsk === 'one' ? 'Print roster' : 'Print all class rosters'}
           onClose={() => setPrintAsk(null)}
-          onSave={() => { const which = printAsk; setPrintAsk(null); if (which === 'one') printRoster(printOpts); else printAllRosters(printOpts) }}
+          onSave={() => { const which = printAsk; setPrintAsk(null); const o = { ...printOpts, extraFields: rosterFields }; if (which === 'one') printRoster(o); else printAllRosters(o) }}
           saveLabel="Print"
         >
           <div className="field">
@@ -2006,6 +2256,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
               )}
             </>
           )}
+          <PrintFieldPicker context="roster" selected={rosterFields} onChange={setRosterFields} priv={rosterPriv} />
         </Modal>
       )}
       {broadcast && (
