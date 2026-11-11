@@ -4361,20 +4361,94 @@ function toLocalInputValue(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+// Default wording for the recital emails. Shown in the editor until Corrie
+// writes her own, so she is always editing real text, never a blank box.
+const RECITAL_EMAIL_DEFAULTS = {
+  confirm_subject: 'Your Shine recital tickets: {show_name}',
+  confirm_body: "Hi {parent_name},\n\nYou are confirmed for {ticket_count} ticket(s) to {show_name} on {show_date} at {show_time}.\n\nWe can't wait to see you there!\n\nShine Dance Studio",
+  reminder_subject: 'Reminder: {show_name} is coming up',
+  reminder_body: "Hi Shine families,\n\nThis is a friendly reminder that you have tickets reserved for {show_name} on {show_date} at {show_time}.\n\nWe can't wait to see you there!\n\nShine Dance Studio",
+}
+// Fills the show placeholders in an email. A reminder goes to a whole
+// show's families in one message, so only show-level placeholders exist
+// here; per-family ones ({parent_name}, {ticket_count}) belong to the
+// confirmation email.
+function fillShowPlaceholders(text, show) {
+  const date = show?.show_date ? new Date(show.show_date + 'T00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) : ''
+  return String(text || '')
+    .replaceAll('{show_name}', show?.name || 'the recital')
+    .replaceAll('{show_date}', date || 'the scheduled date')
+    .replaceAll('{show_time}', show?.show_time || 'the scheduled time')
+}
+
 function RecitalSettingsTab() {
   const [settings, setSettings] = useState(null)
   const [saving, setSaving] = useState(false)
   const [savedNote, setSavedNote] = useState('')
   const [releasing, setReleasing] = useState(false)
+  const [photoBusy, setPhotoBusy] = useState(false)
+  const [photoNote, setPhotoNote] = useState('')
+  // The coming-soon photo lives in the same public bucket as the site's
+  // hero and gallery photos. It saves the moment it is chosen (not on
+  // "Save settings"), so an upload is never lost by navigating away.
+  async function uploadSoonPhoto(e) {
+    const file = e.target.files?.[0]; e.target.value = ''
+    if (!file) return
+    if (!file.type.startsWith('image/')) { setPhotoNote('Could not upload: please choose a photo file.'); return }
+    setPhotoBusy(true); setPhotoNote('')
+    const { error: upErr } = await supabase.storage.from('site-photos').upload('recital/coming-soon', file, { upsert: true, contentType: file.type })
+    if (upErr) { console.error('RecitalSettings: photo upload failed —', upErr); setPhotoBusy(false); setPhotoNote(`Could not upload: ${upErr.message}`); return }
+    const url = supabase.storage.from('site-photos').getPublicUrl('recital/coming-soon').data.publicUrl + '?v=' + Date.now()
+    const { error } = await supabase.from('recital_settings').update({ coming_soon_photo_url: url }).eq('id', 1)
+    setPhotoBusy(false)
+    if (error) { console.error('RecitalSettings: saving photo link failed —', error); setPhotoNote(`Could not save the photo: ${error.message}`); return }
+    setSettings((s) => ({ ...s, coming_soon_photo_url: url })); setPhotoNote('Photo saved ✓')
+  }
+  async function removeSoonPhoto() {
+    if (!confirm('Remove the photo from the coming soon page?')) return
+    setPhotoBusy(true); setPhotoNote('')
+    const { error } = await supabase.from('recital_settings').update({ coming_soon_photo_url: null }).eq('id', 1)
+    if (error) { setPhotoBusy(false); setPhotoNote(`Could not remove: ${error.message}`); return }
+    await supabase.storage.from('site-photos').remove(['recital/coming-soon'])
+    setPhotoBusy(false); setSettings((s) => ({ ...s, coming_soon_photo_url: null })); setPhotoNote('Photo removed ✓')
+  }
   const load = useCallback(async () => {
     const { data } = await supabase.from('recital_settings').select('*').eq('id', 1).maybeSingle()
-    setSettings(data || { id: 1, capacity_mode: 'per_show', combined_capacity: '', reservation_deadline: '', released: false })
+    const base = data || { id: 1, capacity_mode: 'per_show', combined_capacity: '', reservation_deadline: '', released: false }
+    // Blank email wording shows the default text, so the editor is never empty.
+    const withDefaults = { ...base }
+    if (!withDefaults.page_mode) withDefaults.page_mode = withDefaults.page_enabled ? 'open' : 'hidden'
+    if (withDefaults.coming_soon_show_dates == null) withDefaults.coming_soon_show_dates = true
+    for (const k of Object.keys(RECITAL_EMAIL_DEFAULTS)) if (!withDefaults[k]) withDefaults[k] = RECITAL_EMAIL_DEFAULTS[k]
+    setSettings(withDefaults)
   }, [])
   useEffect(() => { load() }, [load])
 
   async function save() {
-    setSaving(true); setSavedNote('')
+    setSavedNote('')
+    const maxPerFamily = Number(settings.max_per_family ?? 6)
+    if (!Number.isInteger(maxPerFamily) || maxPerFamily < 1 || maxPerFamily > 50) {
+      setSavedNote('Could not save: Tickets per family must be a whole number from 1 to 50.'); return
+    }
+    setSaving(true)
+    const text = (v) => (String(v || '').trim() ? String(v).trim() : null)
     const { error } = await supabase.from('recital_settings').update({
+      // page_enabled is the older on/off switch. Kept in step with the
+      // page status so a site still running older code behaves sensibly.
+      page_enabled: settings.page_mode !== 'hidden',
+      page_mode: settings.page_mode,
+      coming_soon_message: text(settings.coming_soon_message),
+      coming_soon_show_dates: !!settings.coming_soon_show_dates,
+      // Same timezone handling as the release deadline below.
+      opens_at: settings.opens_at ? new Date(settings.opens_at).toISOString() : null,
+      max_per_family: maxPerFamily,
+      family_cap_scope: settings.family_cap_scope || null,
+      page_notes: text(settings.page_notes),
+      emails_enabled: !!settings.emails_enabled,
+      confirm_subject: text(settings.confirm_subject),
+      confirm_body: text(settings.confirm_body),
+      reminder_subject: text(settings.reminder_subject),
+      reminder_body: text(settings.reminder_body),
       capacity_mode: settings.capacity_mode,
       combined_capacity: settings.combined_capacity === '' ? null : Number(settings.combined_capacity),
       // The datetime-local picker gives a timezone-less string (e.g.
@@ -4425,6 +4499,75 @@ function RecitalSettingsTab() {
             <br /><button className="btn small" style={{ marginTop: 10 }} onClick={releaseNow} disabled={releasing}>{releasing ? 'Releasing…' : 'Release remaining tickets to everyone now'}</button>
           </div>
         )}
+      </div>
+
+      <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Public tickets page</h3>
+        <div className="field">
+          <label>Tickets page status</label>
+          <select value={settings.page_mode} onChange={(e) => setSettings({ ...settings, page_mode: e.target.value })}>
+            <option value="hidden">Hidden: no link on the website</option>
+            <option value="coming_soon">Coming soon: page is visible, no reservations yet</option>
+            <option value="open">Open: families can reserve</option>
+          </select>
+        </div>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '-4px 0 14px' }}>
+          {settings.page_mode === 'hidden' && 'The "Recital Tickets" link is hidden, and anyone who finds the page is told reservations aren\'t open yet.'}
+          {settings.page_mode === 'coming_soon' && (settings.opens_at
+            ? `The page shows your coming soon details below, and opens for reservations by itself on ${new Date(settings.opens_at).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' })}.`
+            : 'The page shows your coming soon details below. It stays that way until you change this to Open (or set a go-live time below).')}
+          {settings.page_mode === 'open' && 'Families can reserve now. The coming soon details below are saved but not shown.'}
+        </p>
+        <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: '14px 14px 4px', marginBottom: 16, opacity: settings.page_mode === 'coming_soon' ? 1 : 0.7 }}>
+          <strong style={{ fontSize: 13.5 }}>Coming soon page</strong>
+          <Field label="Message" textarea rows={3} value={settings.coming_soon_message || ''} onChange={(e) => setSettings({ ...settings, coming_soon_message: e.target.value })} placeholder="e.g. Our spring recital is on its way! Ticket reservations will open here soon." />
+          <Field label="Tickets go live on (optional)" type="datetime-local" value={toLocalInputValue(settings.opens_at)} onChange={(e) => setSettings({ ...settings, opens_at: e.target.value })} />
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>If you set this, the page says "Tickets go live on" with this date and time, and opens for reservations by itself when it arrives. Leave it blank to just say coming soon and open it by hand.</p>
+          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 14 }}>
+            <input type="checkbox" checked={!!settings.coming_soon_show_dates} onChange={(e) => setSettings({ ...settings, coming_soon_show_dates: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
+            <span style={{ flex: 1 }}><strong>List the show dates and times</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Shows every active show from the Shows tab. Untick to keep the dates under wraps and show only the message.</span></span>
+          </label>
+          <div className="field">
+            <label>Photo (optional), for example one from last year's show</label>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+              {settings.coming_soon_photo_url && <img src={settings.coming_soon_photo_url} alt="Coming soon page" style={{ width: 120, height: 80, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--line)' }} />}
+              <label className="btn ghost small" style={{ cursor: photoBusy ? 'wait' : 'pointer' }}>
+                {photoBusy ? 'Working…' : settings.coming_soon_photo_url ? 'Replace photo' : 'Upload a photo'}
+                <input type="file" accept="image/*" style={{ display: 'none' }} onChange={uploadSoonPhoto} disabled={photoBusy} />
+              </label>
+              {settings.coming_soon_photo_url && <button type="button" className="btn ghost small" onClick={removeSoonPhoto} disabled={photoBusy}>Remove</button>}
+              {photoNote && <span style={{ fontSize: 13, color: photoNote.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)' }}>{photoNote}</span>}
+            </div>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '6px 0 0' }}>The photo saves as soon as you choose it. It is public once the page is in coming soon mode.</p>
+          </div>
+        </div>
+        <div className="field row2">
+          <Field label="Tickets per family" type="number" min="1" max="50" value={settings.max_per_family ?? 6} onChange={(e) => setSettings({ ...settings, max_per_family: e.target.value })} />
+          <div className="field">
+            <label>That limit applies</label>
+            <select value={settings.family_cap_scope || (settings.capacity_mode === 'combined' ? 'total' : 'per_show')} onChange={(e) => setSettings({ ...settings, family_cap_scope: e.target.value })}>
+              <option value="per_show">Per show (a family can get this many for each show)</option>
+              <option value="total">In total, across all shows</option>
+            </select>
+          </div>
+        </div>
+        <Field label="Notes shown on the tickets page (optional)" textarea rows={4} value={settings.page_notes || ''} onChange={(e) => setSettings({ ...settings, page_notes: e.target.value })} placeholder="e.g. Children on a lap don't need a ticket. Doors open 30 minutes before each show." />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Show names, dates, times and seat counts are on the <strong>Shows</strong> tab. Add one for each performance, and edit or replace them each year.</p>
+      </div>
+
+      <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Recital emails</h3>
+        <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 14 }}>
+          <input type="checkbox" checked={!!settings.emails_enabled} onChange={(e) => setSettings({ ...settings, emails_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
+          <span style={{ flex: 1 }}><strong>Allow recital emails to be sent</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Leave this off while testing. When it is off, the reminder button on the Reservations tab can only send a test to you.</span></span>
+        </label>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 10px' }}>You can use {'{show_name}'}, {'{show_date}'} and {'{show_time}'} in either email. The confirmation email can also use {'{parent_name}'} and {'{ticket_count}'}.</p>
+        <Field label="Reminder email: subject" value={settings.reminder_subject || ''} onChange={(e) => setSettings({ ...settings, reminder_subject: e.target.value })} />
+        <Field label="Reminder email: message" textarea rows={7} value={settings.reminder_body || ''} onChange={(e) => setSettings({ ...settings, reminder_body: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Send it from the <strong>Reservations</strong> tab with "Email a reminder".</p>
+        <Field label="Confirmation email: subject" value={settings.confirm_subject || ''} onChange={(e) => setSettings({ ...settings, confirm_subject: e.target.value })} />
+        <Field label="Confirmation email: message" textarea rows={7} value={settings.confirm_body || ''} onChange={(e) => setSettings({ ...settings, confirm_body: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: '#a3741f', margin: '4px 0 14px' }}>Not connected yet: the wording is saved here, but families do not receive a confirmation email when they reserve until that piece is built.</p>
       </div>
 
       <div className="card card-pad">
@@ -4484,7 +4627,7 @@ function RecitalShowsTab() {
     load()
   }
   async function remove(id) {
-    if (!confirm('Delete this show? Any reservations already made for it stay in the system, just no longer linked to a visible show.')) return
+    if (!confirm('Delete this show? This also permanently deletes every reservation made for it. To hide a show and keep its reservations, use Deactivate instead.')) return
     const { error } = await supabase.from('recital_shows').delete().eq('id', id)
     if (error) { alert(`Could not delete: ${error.message}`); return }
     load()
@@ -4539,12 +4682,18 @@ function RecitalReservationsTab() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [q, setQ] = useState('')
   const [busyId, setBusyId] = useState('')
+  const [emailSettings, setEmailSettings] = useState(null)
+  const [remind, setRemind] = useState(null) // { showId, subject, body, sending, note }
   const load = useCallback(async () => {
     const [r, s] = await Promise.all([
       supabase.from('ticket_reservations').select('*, recital_shows(name)').order('created_at', { ascending: false }),
-      supabase.from('recital_shows').select('id, name').order('sort_order'),
+      // Full rows, not just id and name: the over-capacity warning needs
+      // each show's capacity, and the reminder needs its date and time.
+      supabase.from('recital_shows').select('*').order('sort_order'),
     ])
     setRows(r.data || []); setShows(s.data || [])
+    const st = await supabase.from('recital_settings').select('*').eq('id', 1).maybeSingle()
+    setEmailSettings(st.data || null)
   }, [])
   useEffect(() => { load() }, [load])
   // Promoting off the waitlist deliberately does NOT hard-block at
@@ -4618,6 +4767,54 @@ function RecitalReservationsTab() {
     w.document.close(); w.focus(); w.print()
   }
 
+  // ---- Reminder email to everyone holding confirmed tickets ----
+  // One message per show, so each family gets their own show's name, date
+  // and time. Addresses go in BCC (the sender does that), in batches small
+  // enough for Gmail's per-message recipient limit.
+  function confirmedEmailsFor(showId) {
+    return [...new Set((rows || []).filter((r) => r.status === 'confirmed' && r.show_id === showId).map((r) => (r.email || '').trim().toLowerCase()).filter(Boolean))]
+  }
+  function reminderTargets(showId) {
+    return shows.filter((s) => !showId || s.id === showId).map((s) => ({ show: s, emails: confirmedEmailsFor(s.id) })).filter((x) => x.emails.length)
+  }
+  function openReminder() {
+    setRemind({
+      showId: showFilter || '',
+      subject: emailSettings?.reminder_subject || RECITAL_EMAIL_DEFAULTS.reminder_subject,
+      body: emailSettings?.reminder_body || RECITAL_EMAIL_DEFAULTS.reminder_body,
+      sending: false, note: '',
+    })
+  }
+  async function sendReminderTest() {
+    const { data: { session } } = await supabase.auth.getSession()
+    const me = session?.user?.email
+    if (!me) { setRemind((r) => ({ ...r, note: 'Could not find your own email address to send a test to.' })); return }
+    const sample = reminderTargets(remind.showId)[0]?.show || shows.find((s) => !remind.showId || s.id === remind.showId) || null
+    setRemind((r) => ({ ...r, sending: true, note: '' }))
+    const res = await sendFromShine({ subject: `[TEST] ${fillShowPlaceholders(remind.subject, sample)}`, message: fillShowPlaceholders(remind.body, sample), emails: [me] })
+    setRemind((r) => ({ ...r, sending: false, note: res.ok ? `Test sent to ${me} ✓` : `Could not send the test: ${res.error}` }))
+  }
+  async function sendReminder() {
+    if (!emailSettings?.emails_enabled) { setRemind((r) => ({ ...r, note: 'Recital emails are switched off. Turn on "Allow recital emails to be sent" on the Settings & Release tab first.' })); return }
+    if (!remind.subject.trim() || !remind.body.trim()) { setRemind((r) => ({ ...r, note: 'Add a subject and a message first.' })); return }
+    const targets = reminderTargets(remind.showId)
+    const total = targets.reduce((n, t) => n + t.emails.length, 0)
+    if (!total) { setRemind((r) => ({ ...r, note: 'There are no confirmed reservations to email for this selection.' })); return }
+    if (!confirm(`Send this reminder to ${total} email address${total === 1 ? '' : 'es'} across ${targets.length} show${targets.length === 1 ? '' : 's'}? This cannot be undone.`)) return
+    setRemind((r) => ({ ...r, sending: true, note: '' }))
+    let sent = 0
+    const failed = []
+    for (const t of targets) {
+      for (let i = 0; i < t.emails.length; i += 80) {
+        const batch = t.emails.slice(i, i + 80)
+        const res = await sendFromShine({ subject: fillShowPlaceholders(remind.subject, t.show), message: fillShowPlaceholders(remind.body, t.show), emails: batch })
+        if (res.ok) sent += batch.length
+        else { console.error('Recital reminder: send failed —', t.show.name, res.error); failed.push(`${t.show.name} (${batch.length}): ${res.error}`) }
+      }
+    }
+    setRemind((r) => ({ ...r, sending: false, note: failed.length ? `Sent to ${sent}. Could not send: ${failed.join('; ')}` : `Reminder sent to ${sent} address${sent === 1 ? '' : 'es'} ✓` }))
+  }
+
   if (!rows) return <div className="loading">Loading…</div>
   const filtered = rows
     .filter((r) => !showFilter || r.show_id === showFilter)
@@ -4640,7 +4837,35 @@ function RecitalReservationsTab() {
         </select>
         <EmailGroupButton emails={emails} label="confirmed families in this view" />
         <button className="btn ghost small" onClick={printDoorList}>Print door list</button>
+        <button className="btn ghost small" onClick={openReminder}>Email a reminder</button>
       </div>
+      {remind && (() => {
+        const targets = reminderTargets(remind.showId)
+        const total = targets.reduce((n, t) => n + t.emails.length, 0)
+        const sample = targets[0]?.show || shows.find((s) => !remind.showId || s.id === remind.showId) || null
+        const off = !emailSettings?.emails_enabled
+        return (
+          <Modal title="Email a reminder" onClose={() => setRemind(null)} onSave={sendReminder} saving={remind.sending} saveLabel={off ? 'Send reminder (emails are off)' : `Send to ${total} address${total === 1 ? '' : 'es'}`}>
+            {off && <div style={{ background: '#fdf9f0', border: '1px solid #e8cf9f', color: '#a3741f', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>Recital emails are switched off, so nothing will go to families. You can still send a test to yourself. Turn emails on from the Settings &amp; Release tab when you are ready.</div>}
+            <div className="field">
+              <label>Who gets it</label>
+              <select value={remind.showId} onChange={(e) => setRemind({ ...remind, showId: e.target.value })}>
+                <option value="">Everyone with confirmed tickets, all shows</option>
+                {shows.map((s) => <option key={s.id} value={s.id}>{s.name} ({confirmedEmailsFor(s.id).length})</option>)}
+              </select>
+            </div>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '-4px 0 10px' }}>Confirmed reservations only, not the waitlist. Each show's families get their own show's name, date and time. Families never see each other's addresses.</p>
+            <Field label="Subject" value={remind.subject} onChange={(e) => setRemind({ ...remind, subject: e.target.value })} />
+            <Field label="Message" textarea rows={8} value={remind.body} onChange={(e) => setRemind({ ...remind, body: e.target.value })} />
+            <p style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '.04em', color: 'var(--brass-dark, #a3741f)', fontWeight: 600, margin: '10px 0 4px' }}>Preview{sample ? `: ${sample.name}` : ''}</p>
+            <div style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '10px 12px', fontSize: 13.5, whiteSpace: 'pre-wrap', background: 'var(--paper, #fafafa)' }}><strong>{fillShowPlaceholders(remind.subject, sample)}</strong>{'\n\n'}{fillShowPlaceholders(remind.body, sample)}</div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 12 }}>
+              <button type="button" className="btn ghost small" onClick={sendReminderTest} disabled={remind.sending}>Send a test to me</button>
+              {remind.note && <span style={{ fontSize: 13, color: remind.note.includes('✓') && !remind.note.includes('Could not') ? 'var(--ok, #2f7d5b)' : '#b23838', fontWeight: 500 }}>{remind.note}</span>}
+            </div>
+          </Modal>
+        )
+      })()}
       <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10 }}>{filtered.length} reservation{filtered.length === 1 ? '' : 's'} shown · {totalConfirmedTickets} confirmed ticket{totalConfirmedTickets === 1 ? '' : 's'}</p>
       {filtered.length === 0 ? (
         <div className="card"><div className="empty"><h3>No reservations yet</h3></div></div>
