@@ -4366,6 +4366,9 @@ function toLocalInputValue(ts) {
 const RECITAL_EMAIL_DEFAULTS = {
   confirm_subject: 'Your Shine recital tickets: {show_name}',
   confirm_body: "Hi {parent_name},\n\nYou are confirmed for {ticket_count} ticket(s) to {show_name} on {show_date} at {show_time}.\n\nWe can't wait to see you there!\n\nShine Dance Studio",
+  waitlist_subject: 'You are on the waitlist: {show_name}',
+  waitlist_body: "Hi {parent_name},\n\n{show_name} on {show_date} at {show_time} is currently full, so the {waitlist_count} ticket(s) you asked for are on the waitlist. You do not have confirmed seats yet. We will reach out if seats open up.\n\nShine Dance Studio",
+  waitlist_note: 'Please note: {waitlist_count} more ticket(s) you asked for are on the waitlist because the show filled up. We will reach out if seats open.',
   reminder_subject: 'Reminder: {show_name} is coming up',
   reminder_body: "Hi Shine families,\n\nThis is a friendly reminder that you have tickets reserved for {show_name} on {show_date} at {show_time}.\n\nWe can't wait to see you there!\n\nShine Dance Studio",
 }
@@ -4447,6 +4450,9 @@ function RecitalSettingsTab() {
       emails_enabled: !!settings.emails_enabled,
       confirm_subject: text(settings.confirm_subject),
       confirm_body: text(settings.confirm_body),
+      waitlist_subject: text(settings.waitlist_subject),
+      waitlist_body: text(settings.waitlist_body),
+      waitlist_note: text(settings.waitlist_note),
       reminder_subject: text(settings.reminder_subject),
       reminder_body: text(settings.reminder_body),
       capacity_mode: settings.capacity_mode,
@@ -4559,15 +4565,20 @@ function RecitalSettingsTab() {
         <h3 style={{ marginTop: 0 }}>Recital emails</h3>
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 14 }}>
           <input type="checkbox" checked={!!settings.emails_enabled} onChange={(e) => setSettings({ ...settings, emails_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
-          <span style={{ flex: 1 }}><strong>Allow recital emails to be sent</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Leave this off while testing. When it is off, the reminder button on the Reservations tab can only send a test to you.</span></span>
+          <span style={{ flex: 1 }}><strong>Allow recital emails to be sent</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Leave this off while testing. When it is off, families get no confirmation email, and the reminder button on the Reservations tab can only send a test to you.</span></span>
         </label>
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 10px' }}>You can use {'{show_name}'}, {'{show_date}'} and {'{show_time}'} in either email. The confirmation email can also use {'{parent_name}'} and {'{ticket_count}'}.</p>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 10px' }}>You can use {'{show_name}'}, {'{show_date}'} and {'{show_time}'} in either email. The confirmation and waitlist emails can also use {'{parent_name}'}, {'{ticket_count}'} (confirmed tickets) and {'{waitlist_count}'} (waitlisted tickets).</p>
         <Field label="Reminder email: subject" value={settings.reminder_subject || ''} onChange={(e) => setSettings({ ...settings, reminder_subject: e.target.value })} />
         <Field label="Reminder email: message" textarea rows={7} value={settings.reminder_body || ''} onChange={(e) => setSettings({ ...settings, reminder_body: e.target.value })} />
         <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Send it from the <strong>Reservations</strong> tab with "Email a reminder".</p>
         <Field label="Confirmation email: subject" value={settings.confirm_subject || ''} onChange={(e) => setSettings({ ...settings, confirm_subject: e.target.value })} />
         <Field label="Confirmation email: message" textarea rows={7} value={settings.confirm_body || ''} onChange={(e) => setSettings({ ...settings, confirm_body: e.target.value })} />
-        <p style={{ fontSize: 12.5, color: '#a3741f', margin: '4px 0 14px' }}>Not connected yet: the wording is saved here, but families do not receive a confirmation email when they reserve until that piece is built.</p>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Sent automatically to a family the moment they reserve, but only while "Allow recital emails to be sent" is ticked above.</p>
+        <Field label="Added to the confirmation when some of their tickets are waitlisted" textarea rows={2} value={settings.waitlist_note || ''} onChange={(e) => setSettings({ ...settings, waitlist_note: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Example: a family asks for 4 and only 2 seats are left. They get the confirmation above for 2, with this line added about the other 2.</p>
+        <Field label="Waitlist email: subject" value={settings.waitlist_subject || ''} onChange={(e) => setSettings({ ...settings, waitlist_subject: e.target.value })} />
+        <Field label="Waitlist email: message" textarea rows={6} value={settings.waitlist_body || ''} onChange={(e) => setSettings({ ...settings, waitlist_body: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Sent instead of the confirmation when a show is full and none of their tickets are confirmed. Keep it clear that they do not have seats yet.</p>
       </div>
 
       <div className="card card-pad">
@@ -4684,6 +4695,9 @@ function RecitalReservationsTab() {
   const [busyId, setBusyId] = useState('')
   const [emailSettings, setEmailSettings] = useState(null)
   const [remind, setRemind] = useState(null) // { showId, subject, body, sending, note }
+  const [editRes, setEditRes] = useState(null) // a reservation being added or changed by hand
+  const [editErr, setEditErr] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
   const load = useCallback(async () => {
     const [r, s] = await Promise.all([
       supabase.from('ticket_reservations').select('*, recital_shows(name)').order('created_at', { ascending: false }),
@@ -4767,6 +4781,56 @@ function RecitalReservationsTab() {
     w.document.close(); w.focus(); w.print()
   }
 
+  // ---- Add or change a reservation by hand ----
+  // For the family who emails or calls instead of using the page, or who
+  // needs a different number of tickets. Staff are trusted here: nothing
+  // is blocked, but going over a show's seats or the family limit asks
+  // first with the real numbers, the same way promoting off the waitlist does.
+  async function saveReservation() {
+    setEditErr('')
+    const r = editRes
+    const count = Number(r.ticket_count)
+    if (!r.show_id) { setEditErr('Choose a show.'); return }
+    if (!String(r.parent_name || '').trim()) { setEditErr('Add the parent or guest name.'); return }
+    if (!Number.isInteger(count) || count < 1 || count > 50) { setEditErr('Tickets must be a whole number from 1 to 50.'); return }
+    const email = String(r.email || '').trim().toLowerCase()
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { setEditErr('That email address does not look right. Fix it, or leave it blank.'); return }
+    if (r.status === 'confirmed') {
+      const mode = emailSettings?.capacity_mode || 'per_show'
+      const show = shows.find((s) => s.id === r.show_id)
+      const capacity = mode === 'per_show' ? show?.capacity : emailSettings?.combined_capacity
+      if (capacity) {
+        const others = rows.filter((x) => x.id !== r.id && x.status === 'confirmed' && (mode !== 'per_show' || x.show_id === r.show_id)).reduce((n, x) => n + x.ticket_count, 0)
+        if (others + count > capacity && !confirm(`Heads up: this puts ${mode === 'per_show' ? (show?.name || 'the show') : 'the recital'} ${others + count - capacity} over capacity (${others} of ${capacity} already confirmed). Save anyway?`)) return
+      }
+    }
+    setEditSaving(true)
+    const payload = { show_id: r.show_id, parent_name: String(r.parent_name).trim(), email, phone: String(r.phone || '').trim() || null, student_name: String(r.student_name || '').trim() || null, ticket_count: count, status: r.status }
+    const { error } = r.id
+      ? await supabase.from('ticket_reservations').update(payload).eq('id', r.id)
+      : await supabase.from('ticket_reservations').insert({ ...payload, phase: 'staff' })
+    setEditSaving(false)
+    if (error) { console.error('Reservations: save failed —', error); setEditErr(`Could not save: ${error.message}`); return }
+    setEditRes(null); load()
+  }
+  // ---- Keep a copy, and start a new year ----
+  function downloadReservations() {
+    if (!rows.length) { alert('There are no reservations to download.'); return }
+    const headers = ['Show', 'Parent', 'Student', 'Tickets', 'Status', 'Email', 'Phone', 'Reserved on', 'Phase']
+    const data = rows.slice().sort((a, b) => (a.recital_shows?.name || '').localeCompare(b.recital_shows?.name || '') || (a.parent_name || '').localeCompare(b.parent_name || ''))
+      .map((r) => [r.recital_shows?.name || '', r.parent_name, r.student_name || '', r.ticket_count, r.status, r.email || '', r.phone || '', r.created_at ? new Date(r.created_at).toLocaleString() : '', r.phase || ''])
+    downloadTextFile(`shine-recital-reservations-${localDateString()}.csv`, toCsv(headers, data), 'text/csv;charset=utf-8')
+  }
+  async function clearAllReservations() {
+    if (!rows.length) { alert('There are no reservations to clear.'); return }
+    if (!confirm(`Start fresh for a new recital?\n\nThis permanently deletes ALL ${rows.length} reservations, for every show, confirmed and waitlisted. It cannot be undone.\n\nDownload a copy first if you want a record ("Download list").`)) return
+    const typed = prompt('To confirm, type DELETE in capital letters.')
+    if (typed !== 'DELETE') { if (typed !== null) alert('Nothing was deleted. The word did not match.'); return }
+    const { error } = await supabase.from('ticket_reservations').delete().not('id', 'is', null)
+    if (error) { console.error('Reservations: clear all failed —', error); alert(`Could not clear: ${error.message}`); return }
+    load()
+  }
+
   // ---- Reminder email to everyone holding confirmed tickets ----
   // One message per show, so each family gets their own show's name, date
   // and time. Addresses go in BCC (the sender does that), in batches small
@@ -4838,7 +4902,41 @@ function RecitalReservationsTab() {
         <EmailGroupButton emails={emails} label="confirmed families in this view" />
         <button className="btn ghost small" onClick={printDoorList}>Print door list</button>
         <button className="btn ghost small" onClick={openReminder}>Email a reminder</button>
+        <button className="btn small" onClick={() => { setEditErr(''); setEditRes({ show_id: showFilter || (shows.length === 1 ? shows[0].id : ''), parent_name: '', student_name: '', email: '', phone: '', ticket_count: 1, status: 'confirmed' }) }}>Add reservation</button>
+        <button className="btn ghost small" onClick={downloadReservations}>Download list</button>
+        <button className="btn danger small" onClick={clearAllReservations}>Clear all (new year)</button>
       </div>
+      {editRes && (
+        <Modal title={editRes.id ? 'Change reservation' : 'Add reservation'} onClose={() => setEditRes(null)} onSave={saveReservation} saving={editSaving}>
+          {editErr && <div style={{ background: '#fdecec', border: '1px solid #f3c9c9', color: '#b23838', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 14 }}>{editErr}</div>}
+          <div className="field">
+            <label>Show</label>
+            <select value={editRes.show_id || ''} onChange={(e) => setEditRes({ ...editRes, show_id: e.target.value })}>
+              <option value="">Select a show…</option>
+              {shows.map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? '' : ' (inactive)'}</option>)}
+            </select>
+          </div>
+          <div className="field row2">
+            <Field label="Parent or guest name" value={editRes.parent_name || ''} onChange={(e) => setEditRes({ ...editRes, parent_name: e.target.value })} />
+            <Field label="Dancer's name (optional)" value={editRes.student_name || ''} onChange={(e) => setEditRes({ ...editRes, student_name: e.target.value })} />
+          </div>
+          <div className="field row2">
+            <Field label="Email (optional)" type="email" value={editRes.email || ''} onChange={(e) => setEditRes({ ...editRes, email: e.target.value })} />
+            <Field label="Phone (optional)" value={editRes.phone || ''} onChange={(e) => setEditRes({ ...editRes, phone: e.target.value })} />
+          </div>
+          <div className="field row2">
+            <Field label="Tickets" type="number" min="1" max="50" value={editRes.ticket_count} onChange={(e) => setEditRes({ ...editRes, ticket_count: e.target.value })} />
+            <div className="field">
+              <label>Status</label>
+              <select value={editRes.status} onChange={(e) => setEditRes({ ...editRes, status: e.target.value })}>
+                <option value="confirmed">Confirmed</option>
+                <option value="waitlist">Waitlist</option>
+              </select>
+            </div>
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 0' }}>Saving here does not send the family an email. The per-family ticket limit is not enforced for staff, so you can make an exception when you need to.</p>
+        </Modal>
+      )}
       {remind && (() => {
         const targets = reminderTargets(remind.showId)
         const total = targets.reduce((n, t) => n + t.emails.length, 0)
@@ -4880,9 +4978,10 @@ function RecitalReservationsTab() {
                 <td data-label="Show">{r.recital_shows?.name || '—'}</td>
                 <td data-label="Tickets">{r.ticket_count}</td>
                 <td data-label="Status"><span className={`pill ${r.status === 'confirmed' ? 'enrolled' : 'waitlist'}`}>{r.status}</span></td>
-                <td data-label="Contact">{r.email}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.phone}</span></td>
+                <td data-label="Contact">{r.email}<br /><span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{r.phone}</span>{r.confirmation_sent_at && <><br /><span style={{ color: 'var(--ok, #2f7d5b)', fontSize: 12 }}>Confirmation emailed</span></>}</td>
                 <td data-label="Phase">{r.phase}</td>
                 <td><div className="row-actions">
+                  <button className="btn ghost small" onClick={() => { setEditErr(''); setEditRes({ ...r }) }}>Edit</button>
                   {r.status === 'waitlist' && <button className="btn ghost small" disabled={busyId === r.id} onClick={() => promote(r)}>Promote to confirmed</button>}
                   <button className="btn danger small" onClick={() => remove(r.id)}>Remove</button>
                 </div></td>
