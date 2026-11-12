@@ -29,6 +29,14 @@ import { createClient } from '@supabase/supabase-js'
 import nodemailer from 'nodemailer'
 import { pacificDateString, currentGreeting, renderReminder, REMINDER_SUBJECT } from './_meeting-reminder-shared.mjs'
 
+// Only plain addresses are ever handed to the mail library. Addresses
+// come from public forms, and the older mail library this site runs has
+// known flaws in how it reads unusual ones (quotes, comments, semicolons,
+// angle brackets), where display text can end up treated as a second
+// recipient. A plain name@domain address cannot trigger any of that.
+const SAFE_EMAIL = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/
+const isSafeEmail = (e) => typeof e === 'string' && e.length <= 254 && SAFE_EMAIL.test(e)
+
 export const handler = async () => {
   const supabaseUrl = process.env.VITE_SUPABASE_URL
   const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY
@@ -113,6 +121,7 @@ export const handler = async () => {
     let sentCount = 0
     const failures = []
     for (const r of recipients) {
+      if (!isSafeEmail(String(r.email || '').trim())) { failures.push({ email: String(r.email || '').slice(0, 80), error: 'not a plain email address, skipped' }); continue }
       const body = renderReminder(sc.parent_meeting_reminder_template, {
         greeting, parentName: r.parent_name, studentName: r.student_name, meetingDetails: meeting.label,
       })

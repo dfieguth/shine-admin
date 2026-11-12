@@ -16,6 +16,14 @@
 
 import nodemailer from 'nodemailer'
 
+// Only plain addresses are ever handed to the mail library. Addresses
+// come from public forms, and the older mail library this site runs has
+// known flaws in how it reads unusual ones (quotes, comments, semicolons,
+// angle brackets), where display text can end up treated as a second
+// recipient. A plain name@domain address cannot trigger any of that.
+const SAFE_EMAIL = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/
+const isSafeEmail = (e) => typeof e === 'string' && e.length <= 254 && SAFE_EMAIL.test(e)
+
 export const handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return json(405, { ok: false, error: 'Method not allowed' })
@@ -102,13 +110,16 @@ export const handler = async (event) => {
 
   const subject = (body.subject || '').trim()
   const message = (body.message || '').trim()
-  const emails = Array.isArray(body.emails)
+  const allEmails = Array.isArray(body.emails)
     ? [...new Set(body.emails.map((e) => String(e || '').trim()).filter(Boolean))]
     : []
+  const emails = allEmails.filter(isSafeEmail)
+  const skipped = allEmails.filter((e) => !isSafeEmail(e))
+  if (skipped.length) console.error(`send-broadcast: skipped ${skipped.length} address(es) that are not plain name@domain addresses —`, skipped.map((e) => e.slice(0, 80)))
 
   if (!subject) return json(400, { ok: false, error: 'Subject is required' })
   if (!message) return json(400, { ok: false, error: 'Message is required' })
-  if (!emails.length) return json(400, { ok: false, error: 'No recipient emails' })
+  if (!emails.length) return json(400, { ok: false, error: allEmails.length ? 'None of the email addresses are valid' : 'No recipient emails' })
 
   // --- Send -------------------------------------------------------------
   // Everyone goes in BCC so families never see each other's addresses.
