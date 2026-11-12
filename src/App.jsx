@@ -4395,6 +4395,47 @@ function toLocalInputValue(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+// One printable recital ticket per family reservation. The show TIME is
+// the biggest thing on it on purpose: ushers are mainly checking that a
+// family is at the right performance. Nothing relies on background
+// colors, because browsers leave those out when printing by default.
+// Every value is escaped: names come from public forms.
+const RECITAL_TICKET_CSS = `
+  body{font-family:Georgia,'Times New Roman',serif;margin:24px;color:#1c2250}
+  .ticket{display:flex;border:3px solid #1c2250;border-radius:14px;margin:0 0 22px;page-break-inside:avoid;break-inside:avoid;max-width:760px}
+  .t-main{flex:1;padding:18px 22px;min-width:0}
+  .t-brand{font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700}
+  .t-show{font-size:19px;font-weight:700;margin:6px 0 2px;overflow-wrap:anywhere}
+  .t-time{font-size:64px;font-weight:700;line-height:1.02;margin:4px 0 2px}
+  .t-date{font-size:19px}
+  .t-fam{font-size:14px;margin-top:10px;color:#333;overflow-wrap:anywhere}
+  .t-stub{width:150px;border-left:3px dashed #1c2250;padding:18px 12px;text-align:center;display:flex;flex-direction:column;justify-content:center}
+  .t-admit{font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700}
+  .t-count{font-size:68px;font-weight:700;line-height:1}
+  .t-seats{font-size:13px}
+  .t-note{font-size:11px;color:#555;margin-top:10px}
+  @media print { body{margin:10mm} }
+`
+function recitalTicketHtml({ showName, showDate, showTime, parentName, studentName, count }) {
+  const date = showDate ? new Date(showDate + 'T00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : ''
+  const n = Number(count) || 0
+  return `<div class="ticket">
+    <div class="t-main">
+      <div class="t-brand">Shine Dance Studio · Recital Ticket</div>
+      <div class="t-show">${esc(showName || 'Recital')}</div>
+      <div class="t-time">${esc(showTime || '')}</div>
+      <div class="t-date">${esc(date)}</div>
+      <div class="t-fam">${esc(parentName || '')}${studentName ? ` · Dancer: ${esc(studentName)}` : ''}</div>
+    </div>
+    <div class="t-stub">
+      <div class="t-admit">Admit</div>
+      <div class="t-count">${n}</div>
+      <div class="t-seats">${n === 1 ? 'guest' : 'guests'}</div>
+      <div class="t-note">Good for this show only</div>
+    </div>
+  </div>`
+}
+
 // Default wording for the recital emails. Shown in the editor until Corrie
 // writes her own, so she is always editing real text, never a blank box.
 const RECITAL_EMAIL_DEFAULTS = {
@@ -4467,6 +4508,10 @@ function RecitalSettingsTab() {
     if (!Number.isInteger(maxPerFamily) || maxPerFamily < 1 || maxPerFamily > 50) {
       setSavedNote('Could not save: Tickets per family must be a whole number from 1 to 50.'); return
     }
+    const autoDays = Number(settings.auto_reminder_days ?? 2)
+    if (!Number.isInteger(autoDays) || autoDays < 1 || autoDays > 30) {
+      setSavedNote('Could not save: the automatic reminder must be a whole number of days from 1 to 30.'); return
+    }
     setSaving(true)
     const text = (v) => (String(v || '').trim() ? String(v).trim() : null)
     const { error } = await supabase.from('recital_settings').update({
@@ -4489,6 +4534,8 @@ function RecitalSettingsTab() {
       waitlist_note: text(settings.waitlist_note),
       reminder_subject: text(settings.reminder_subject),
       reminder_body: text(settings.reminder_body),
+      auto_reminder_enabled: !!settings.auto_reminder_enabled,
+      auto_reminder_days: autoDays,
       capacity_mode: settings.capacity_mode,
       combined_capacity: settings.combined_capacity === '' ? null : Number(settings.combined_capacity),
       // The datetime-local picker gives a timezone-less string (e.g.
@@ -4604,7 +4651,18 @@ function RecitalSettingsTab() {
         <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 10px' }}>You can use {'{show_name}'}, {'{show_date}'} and {'{show_time}'} in either email. The confirmation and waitlist emails can also use {'{parent_name}'}, {'{ticket_count}'} (confirmed tickets) and {'{waitlist_count}'} (waitlisted tickets).</p>
         <Field label="Reminder email: subject" value={settings.reminder_subject || ''} onChange={(e) => setSettings({ ...settings, reminder_subject: e.target.value })} />
         <Field label="Reminder email: message" textarea rows={7} value={settings.reminder_body || ''} onChange={(e) => setSettings({ ...settings, reminder_body: e.target.value })} />
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Send it from the <strong>Reservations</strong> tab with "Email a reminder".</p>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Send it yourself any time from the <strong>Reservations</strong> tab with "Email a reminder", or have it go out by itself:</p>
+        <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
+          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!settings.auto_reminder_enabled} onChange={(e) => setSettings({ ...settings, auto_reminder_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
+            <span style={{ flex: 1 }}><strong>Send the reminder automatically before each show</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Goes to everyone with confirmed tickets for that show, once, at about 9 AM Pacific. It only sends while "Allow recital emails to be sent" above is also ticked.</span></span>
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '10px 0 0 26px', fontSize: 14 }}>
+            <input type="number" min="1" max="30" value={settings.auto_reminder_days ?? 2} onChange={(e) => setSettings({ ...settings, auto_reminder_days: e.target.value })} style={{ width: 70 }} />
+            <span>day{Number(settings.auto_reminder_days ?? 2) === 1 ? '' : 's'} before the show</span>
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '8px 0 0 26px' }}>The Shows tab shows the date each show's reminder will go out, and when it was sent.</p>
+        </div>
         <Field label="Confirmation email: subject" value={settings.confirm_subject || ''} onChange={(e) => setSettings({ ...settings, confirm_subject: e.target.value })} />
         <Field label="Confirmation email: message" textarea rows={7} value={settings.confirm_body || ''} onChange={(e) => setSettings({ ...settings, confirm_body: e.target.value })} />
         <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Sent automatically to a family the moment they reserve, but only while "Allow recital emails to be sent" is ticked above.</p>
@@ -4645,12 +4703,31 @@ function RecitalShowsTab() {
   const [edit, setEdit] = useState(null)
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState('')
+  const [codes, setCodes] = useState({})
+  const [showSettings, setShowSettings] = useState(null)
+  // When (or whether) a show's automatic reminder goes out, in plain words.
+  function reminderStatus(s) {
+    if (s.reminder_sent_at) return `Sent ${new Date(s.reminder_sent_at).toLocaleDateString()}`
+    if (!showSettings?.auto_reminder_enabled) return 'Automatic reminder is off'
+    if (!s.show_date) return 'Needs a show date'
+    const d = new Date(s.show_date + 'T00:00'); d.setDate(d.getDate() - (Number(showSettings.auto_reminder_days) || 2))
+    const when = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    return showSettings.emails_enabled ? `Will send ${when}` : `Set for ${when}, but recital emails are off`
+  }
   const load = useCallback(async () => {
-    const [s, c] = await Promise.all([
+    const [s, c, k, st] = await Promise.all([
       supabase.from('recital_shows').select('*').order('sort_order').order('show_date'),
       supabase.rpc('ticket_counts_by_show'),
+      // Access codes live in their own admin-only table, so the public
+      // site can never read them.
+      supabase.from('recital_show_codes').select('show_id, code'),
+      supabase.from('recital_settings').select('*').eq('id', 1).maybeSingle(),
     ])
     setRows(s.data || [])
+    const codeMap = {}
+    for (const row of k.data || []) codeMap[row.show_id] = row.code
+    setCodes(codeMap)
+    setShowSettings(st.data || null)
     const map = {}
     for (const row of c.data || []) map[row.show_id] = Number(row.confirmed_count) || 0
     setCounts(map)
@@ -4658,12 +4735,26 @@ function RecitalShowsTab() {
   useEffect(() => { load() }, [load])
   async function save() {
     setSaving(true); setSaveErr('')
+    // access_code is not a column on the show. It is saved separately below.
+    const access_code = edit.access_code
     const payload = { ...edit, capacity: edit.capacity === '' ? null : Number(edit.capacity) }
-    const { error } = edit.id
-      ? await supabase.from('recital_shows').update(payload).eq('id', edit.id)
-      : await supabase.from('recital_shows').insert(payload)
+    delete payload.access_code
+    // Maintained by the database from the codes table. Never written here.
+    delete payload.requires_code
+    // A changed date means a new performance (next year's recital), so its
+    // automatic reminder must be allowed to go out again.
+    const before = edit.id ? rows.find((r) => r.id === edit.id) : null
+    if (before && (before.show_date || '') !== (edit.show_date || '')) payload.reminder_sent_at = null
+    const { data: saved, error } = edit.id
+      ? await supabase.from('recital_shows').update(payload).eq('id', edit.id).select('id').single()
+      : await supabase.from('recital_shows').insert(payload).select('id').single()
+    if (error || !saved) { setSaving(false); console.error('RecitalShows: save failed —', error); setSaveErr(`Could not save: ${error?.message || 'no row came back'}`); return }
+    const code = String(access_code || '').trim()
+    const { error: codeErr } = code
+      ? await supabase.from('recital_show_codes').upsert({ show_id: saved.id, code, updated_at: new Date().toISOString() }, { onConflict: 'show_id' })
+      : await supabase.from('recital_show_codes').delete().eq('show_id', saved.id)
     setSaving(false)
-    if (error) { console.error('RecitalShows: save failed —', error); setSaveErr(`Could not save: ${error.message}`); return }
+    if (codeErr) { console.error('RecitalShows: access code save failed —', codeErr); setSaveErr(`The show saved, but the access code did not: ${codeErr.message}`); load(); return }
     setEdit(null); load()
   }
   async function toggleActive(s) {
@@ -4685,7 +4776,7 @@ function RecitalShowsTab() {
         <div className="card"><div className="empty"><h3>No shows yet</h3><p>Add at least one before families can reserve tickets.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Date</th><th>Time</th><th>Capacity</th><th>Confirmed so far</th><th>Active</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Date</th><th>Time</th><th>Capacity</th><th>Confirmed so far</th><th>Access code</th><th>Reminder</th><th>Active</th><th></th></tr></thead>
           <tbody>
             {rows.map((s) => (
               <tr key={s.id} style={!s.active ? { opacity: 0.55 } : undefined}>
@@ -4694,9 +4785,11 @@ function RecitalShowsTab() {
                 <td data-label="Time">{s.show_time || '—'}</td>
                 <td data-label="Capacity">{s.capacity ?? '—'}</td>
                 <td data-label="Confirmed so far">{counts[s.id] || 0}{s.capacity ? ` / ${s.capacity}` : ''}</td>
+                <td data-label="Access code">{codes[s.id] ? <code style={{ fontSize: 13.5 }}>{codes[s.id]}</code> : <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>None</span>}</td>
+                <td data-label="Reminder" style={{ fontSize: 13, color: 'var(--ink-soft)' }}>{reminderStatus(s)}</td>
                 <td data-label="Active">{s.active ? 'Yes' : 'No'}</td>
                 <td><div className="row-actions">
-                  <button className="btn ghost small" onClick={() => setEdit(s)}>Edit</button>
+                  <button className="btn ghost small" onClick={() => setEdit({ ...s, access_code: codes[s.id] || '' })}>Edit</button>
                   <button className="btn ghost small" onClick={() => toggleActive(s)}>{s.active ? 'Deactivate' : 'Activate'}</button>
                   <button className="btn danger small" onClick={() => remove(s.id)}>Delete</button>
                 </div></td>
@@ -4714,6 +4807,10 @@ function RecitalShowsTab() {
             <Field label="Time" value={edit.show_time || ''} onChange={(e) => setEdit({ ...edit, show_time: e.target.value })} placeholder="e.g. 2:00 PM" />
           </div>
           <Field label="Capacity (only used in Per Show mode — see Settings tab)" type="number" value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} />
+          <Field label="Access code (optional)" value={edit.access_code || ''} onChange={(e) => setEdit({ ...edit, access_code: e.target.value })} placeholder="e.g. SHINE2PM" />
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 0' }}>
+            Give this code only to the families performing in this show. They must type it to reserve, so nobody can book seats for the wrong show. Capitals and spaces around it do not matter. Families in more than one show get each show's code. Leave it blank and the page checks the dancer's name against your "In recital" classes instead. Once tickets are released to everyone, no code is needed.
+          </p>
         </Modal>
       )}
     </>
@@ -4785,6 +4882,19 @@ function RecitalReservationsTab() {
   // the last word of the parent's name, with a blank box to tick off
   // arrivals. Confirmed only: a waitlisted row isn't a seat anyone should
   // be let in on, so putting it on the door sheet would be misleading.
+  // Printed tickets: one per confirmed reservation, three to a page.
+  function printTickets(list) {
+    const confirmedOnly = list.filter((r) => r.status === 'confirmed')
+    if (!confirmedOnly.length) { alert('There are no confirmed reservations to print tickets for in this selection.'); return }
+    const lastName = (r) => (r.parent_name || '').trim().split(/\s+/).slice(-1)[0].toLowerCase()
+    const sorted = confirmedOnly.slice().sort((a, b) => (a.recital_shows?.name || '').localeCompare(b.recital_shows?.name || '') || lastName(a).localeCompare(lastName(b)))
+    const w = window.open('', '_blank')
+    if (!w) { alert('Your browser blocked the print window. Allow pop-ups for this site and try again.'); return }
+    w.document.write(`<!doctype html><html><head><title>Recital tickets</title><style>${RECITAL_TICKET_CSS}</style></head><body>
+      ${sorted.map((r) => { const show = shows.find((s) => s.id === r.show_id); return recitalTicketHtml({ showName: show?.name || r.recital_shows?.name, showDate: show?.show_date, showTime: show?.show_time, parentName: r.parent_name, studentName: r.student_name, count: r.ticket_count }) }).join('')}
+    </body></html>`)
+    w.document.close(); w.focus(); w.print()
+  }
   function printDoorList() {
     const forShow = rows.filter((r) => r.status === 'confirmed' && (!showFilter || r.show_id === showFilter))
     if (!forShow.length) { alert('No confirmed reservations to print for this selection.'); return }
@@ -4935,6 +5045,7 @@ function RecitalReservationsTab() {
         </select>
         <EmailGroupButton emails={emails} label="confirmed families in this view" />
         <button className="btn ghost small" onClick={printDoorList}>Print door list</button>
+        <button className="btn ghost small" onClick={() => printTickets(rows.filter((r) => !showFilter || r.show_id === showFilter))}>Print tickets</button>
         <button className="btn ghost small" onClick={openReminder}>Email a reminder</button>
         <button className="btn small" onClick={() => { setEditErr(''); setEditRes({ show_id: showFilter || (shows.length === 1 ? shows[0].id : ''), parent_name: '', student_name: '', email: '', phone: '', ticket_count: 1, status: 'confirmed' }) }}>Add reservation</button>
         <button className="btn ghost small" onClick={downloadReservations}>Download list</button>
@@ -5016,6 +5127,7 @@ function RecitalReservationsTab() {
                 <td data-label="Phase">{r.phase}</td>
                 <td><div className="row-actions">
                   <button className="btn ghost small" onClick={() => { setEditErr(''); setEditRes({ ...r }) }}>Edit</button>
+                  {r.status === 'confirmed' && <button className="btn ghost small" onClick={() => printTickets([r])}>Ticket</button>}
                   {r.status === 'waitlist' && <button className="btn ghost small" disabled={busyId === r.id} onClick={() => promote(r)}>Promote to confirmed</button>}
                   <button className="btn danger small" onClick={() => remove(r.id)}>Remove</button>
                 </div></td>
