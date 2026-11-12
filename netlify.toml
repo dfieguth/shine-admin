@@ -14,3 +14,10 @@
   # future meeting ever falls in that part of the year; change the "1" to
   # "2" below if the local time needs correcting back to 6:00 PM then.
   schedule = "0 1 * * *"
+
+[functions."send-recital-reminders"]
+  # The automatic recital reminder (Admin > Recital Tickets > Settings &
+  # Release). Checks once a day whether any show is due one. Cron is in
+  # UTC: 17:00 UTC is 9:00 AM Pacific in winter (recital season) and
+  # 10:00 AM in summer.
+  schedule = "0 17 * * *"

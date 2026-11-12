@@ -14,7 +14,7 @@ The internal tool for managing classes, students, families, and enrollments. Rep
 - **Attendance** — pick a class and a date, check off who's present, save. Tap a row to toggle.
 - **Photos** — upload the public site's hero photo and gallery photos right from a phone. No code needed.
 - **Announcements** — post breaks/closures with optional start and end dates; they appear as a banner on the public site and expire automatically.
-- **Recital Tickets** — shows, seat counts, the public tickets page (hidden, coming soon or open), reservations, the door list and recital emails.
+- **Recital Tickets** — shows, seat counts, an access code per show, the public tickets page (hidden, coming soon or open), reservations, printed tickets, the door list, and recital emails including an automatic reminder before each show.
 - **Teacher Access** — limited logins for teachers, and which screens each one can see.
 - **Privacy Settings** — what is allowed to appear on printed rosters and lists.
 
@@ -24,7 +24,7 @@ The internal tool for managing classes, students, families, and enrollments. Rep
 - Go to supabase.com, create a new project. Pick a strong database password and save it.
 - When it finishes provisioning, open the **SQL Editor**, paste the entire contents of `schema.sql`, and run it.
 - Then run every `migration-N.sql` file in number order, one at a time, **skipping 2, 3, 4 and 9**. Those four are already built into `schema.sql`, and running them again stops with an "already exists" error.
-- `schema.sql` on its own is NOT the full database. It is the starting point, and the migrations bring it up to date. (Checked November 2026: this exact sequence, through migration 41, builds the same database as the live one.)
+- `schema.sql` on its own is NOT the full database. It is the starting point, and the migrations bring it up to date. (Checked November 2026: this exact sequence, through migration 42, builds the same database as the live one.)
 - Never edit a migration that has already been run. A change goes in a new, higher-numbered migration file.
 
 ### 2. Create your first staff login
@@ -65,5 +65,5 @@ No data lives only in the app. The database is the source of truth, and `schema.
 
 ## Notes
 - This is the free-ministry version: no billing or tuition by design. Recital tickets are free reservations, not sales.
-- The `netlify/functions` folder holds the server-side pieces (email, password reset, login removal, meeting reminders). The scheduled meeting reminder runs at 01:00 UTC, which is 5 PM Pacific in winter and 6 PM in summer.
+- The `netlify/functions` folder holds the server-side pieces (email, password reset, login removal, meeting reminders). The scheduled meeting reminder runs at 01:00 UTC, which is 5 PM Pacific in winter and 6 PM in summer. The scheduled recital reminder runs at 17:00 UTC, which is 9 AM Pacific in winter and 10 AM in summer.
 - The public site is a separate project that shares this same Supabase database.
