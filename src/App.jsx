@@ -2361,6 +2361,9 @@ const SITE_CONTENT_FIELDS = [
   { key: 'mission_headline', label: 'Mission section headline', where: 'Homepage — "Why Shine" section' },
   { key: 'mission_body', label: 'Mission section paragraph', where: 'Homepage — "Why Shine" section', textarea: true },
   { key: 'mission_chip_level', label: 'Skill-level chip (e.g. "Beginning to advanced")', where: 'Homepage — "Why Shine" section' },
+  { key: 'registration_open', label: 'Is registration open?', where: 'Registration form', yesno: true, help: 'Set to No to close registration. The form is replaced by the message below. Families who are already enrolled are not affected.' },
+  { key: 'registration_closed_message', label: 'Message shown while registration is closed', where: 'Registration form', textarea: true, help: 'Leave blank to use the standard message, which points families to "Just have questions?" at the top of the page.' },
+  { key: 'meetings_required', label: 'Ask families to choose a mandatory parent meeting?', where: 'Registration form', yesno: true, help: 'Set to No once the meetings have passed. The meeting section then disappears from the form and from the confirmation email, so a family registering mid-season is not told to attend a meeting that is already over.' },
   { key: 'registration_intro', label: 'Registration form intro paragraph', where: 'Registration form', textarea: true },
   { key: 'class_select_label', label: 'Class selection instructions', where: 'Registration form' },
   { key: 'not_sure_label', label: '"I\'m not sure" checkbox text', where: 'Registration form' },
@@ -2446,14 +2449,27 @@ function SiteContent() {
           <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: 15 }}>{where}</h3>
           {fields.map((f) => (
             <div key={f.key}>
-              <Field
-                label={f.label}
-                textarea={f.textarea}
-                type={f.type}
-                value={values[f.key] ?? ''}
-                onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
-                style={f.textarea ? { minHeight: 70 } : undefined}
-              />
+              {f.yesno ? (
+                // A switch stored as "yes" or "no". Blank counts as yes, so a
+                // switch nobody has touched behaves the way the site always has.
+                <div className="field">
+                  <label>{f.label}</label>
+                  <select value={String(values[f.key] || '').trim().toLowerCase() === 'no' ? 'no' : 'yes'} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} style={{ maxWidth: 220 }}>
+                    <option value="yes">Yes</option>
+                    <option value="no">No</option>
+                  </select>
+                </div>
+              ) : (
+                <Field
+                  label={f.label}
+                  textarea={f.textarea}
+                  type={f.type}
+                  value={values[f.key] ?? ''}
+                  onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+                  style={f.textarea ? { minHeight: 70 } : undefined}
+                />
+              )}
+              {f.help && <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6, marginBottom: 14 }}>{f.help}</p>}
               {f.key === 'parent_meeting_reminder_template' && (
                 <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6, marginBottom: 14 }}>
                   Use <code>{'{{greeting}}'}</code> (fills in "Good morning" or "Good evening" automatically), <code>{'{{parent_name}}'}</code>, <code>{'{{student_name}}'}</code>, and <code>{'{{meeting_details}}'}</code> (pulls the date/time/room from the label above) — these get replaced automatically for each family.
