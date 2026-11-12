@@ -1,0 +1,11 @@
+# Sent with every page of the staff tool.
+/*
+  # Never allow this site to be shown inside another site's page. That
+  # trick is used to disguise a button so a signed-in person clicks it
+  # without knowing.
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+  X-Robots-Tag: noindex, nofollow
