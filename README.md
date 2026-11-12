@@ -24,7 +24,7 @@ The internal tool for managing classes, students, families, and enrollments. Rep
 - Go to supabase.com, create a new project. Pick a strong database password and save it.
 - When it finishes provisioning, open the **SQL Editor**, paste the entire contents of `schema.sql`, and run it.
 - Then run every `migration-N.sql` file in number order, one at a time, **skipping 2, 3, 4 and 9**. Those four are already built into `schema.sql`, and running them again stops with an "already exists" error.
-- `schema.sql` on its own is NOT the full database. It is the starting point, and the migrations bring it up to date. (Checked November 2026: this exact sequence, through migration 42, builds the same database as the live one.)
+- `schema.sql` on its own is NOT the full database. It is the starting point, and the migrations bring it up to date. (Checked November 2026: this exact sequence, through migration 44, builds the same database as the live one.)
 - Never edit a migration that has already been run. A change goes in a new, higher-numbered migration file.
 
 ### 2. Create your first staff login
