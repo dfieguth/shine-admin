@@ -37,6 +37,26 @@ async function sendFromShine({ subject, message, emails }) {
   }
 }
 
+// Deletes a staff login completely (Teacher Access > Remove). See
+// netlify/functions/delete-staff-login.mjs for why removing only the
+// permissions row was unsafe.
+async function deleteStaffLogin(userId) {
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session?.access_token) return { ok: false, error: 'Not signed in' }
+    const res = await fetch('/.netlify/functions/delete-staff-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ user_id: userId }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || data?.ok === false) return { ok: false, error: data?.error || `HTTP ${res.status}` }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) }
+  }
+}
+
 // Sets a staff login's password directly, bypassing Supabase's email-link
 // reset flow entirely. Built after that flow failed in practice — a reset
 // link opened by Gmail's own background link-scanning before the real
@@ -1976,7 +1996,7 @@ function Enrollments({ initialClassFilter, onConsumeInitialFilter }) {
   const [saving, setSaving] = useState(false)
   const [filterClass, setFilterClass] = useState('')
   useEffect(() => {
-    if (initialClassFilter) { setFilterClass(initialClassFilter); onConsumeInitialFilter && onConsumeInitialFilter() }
+    if (initialClassFilter) { setFilterClass(initialClassFilter); if (onConsumeInitialFilter) onConsumeInitialFilter() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialClassFilter])
   const load = useCallback(async () => {
@@ -2591,7 +2611,7 @@ function Registrations() {
   }, [])
   useEffect(() => { load() }, [load])
   function toggleSelect(id) {
-    setSelectedIds((s) => { const next = new Set(s); next.has(id) ? next.delete(id) : next.add(id); return next })
+    setSelectedIds((s) => { const next = new Set(s); if (next.has(id)) next.delete(id); else next.add(id); return next })
   }
   function toggleSelectAll(visibleIds) {
     setSelectedIds((s) => (visibleIds.every((id) => s.has(id)) ? new Set() : new Set(visibleIds)))
@@ -4071,9 +4091,17 @@ function TeacherAccess() {
     }
     setEdit(null); load()
   }
-  async function remove(userId) {
-    const { error } = await supabase.from('staff_roles').delete().eq('user_id', userId)
-    if (error) { console.error('Teacher Access delete failed —', error); alert(`Couldn't remove: ${error.message}`) }
+  // Remove deletes the LOGIN, not just this row. A login with no row here
+  // is a full admin, so deleting only the row used to turn a "removed"
+  // teacher into an admin whose email and password still worked.
+  const [removingId, setRemovingId] = useState('')
+  async function remove(r) {
+    const who = r.display_name || r.email || 'this login'
+    if (!confirm(`Remove ${who}?\n\nThis deletes their login completely. They will no longer be able to sign in at all. It cannot be undone, but you can create a new login for them later.`)) return
+    setRemovingId(r.user_id)
+    const result = await deleteStaffLogin(r.user_id)
+    setRemovingId('')
+    if (!result.ok) { console.error('Teacher Access: remove failed —', result.error); alert(`Couldn't remove: ${result.error}\n\nNothing was changed. Their access is exactly as it was.`); return }
     load()
   }
   function toggleScreen(key) {
@@ -4088,7 +4116,7 @@ function TeacherAccess() {
         <button className="btn" onClick={() => setEdit({ isNew: true, user_id: '', role: 'teacher', teacher_id: '', allowed_screens: ['attendance', 'my-classes'], display_name: '', email: '' })}>Add teacher login</button>
       </div>
       {rows.length === 0 ? (
-        <div className="card"><div className="empty"><h3>No limited logins yet</h3><p>Anyone who logs in without a row here gets full admin access. Add a row to create a restricted teacher login.</p></div></div>
+        <div className="card"><div className="empty"><h3>No limited logins yet</h3><p>Anyone who logs in without a row here gets full admin access. Add a row to create a restricted teacher login. A new login is a full admin until its row is added, so add the row right after creating it.</p></div></div>
       ) : (
         <div className="table-wrap"><table>
           <thead><tr><th>Name</th><th>Role</th><th>Linked teacher</th><th>Can see</th><th></th></tr></thead>
@@ -4101,7 +4129,7 @@ function TeacherAccess() {
               <td><div className="row-actions">
                 <button className="btn ghost small" onClick={() => setEdit({ ...r, isNew: false, allowed_screens: r.allowed_screens || [] })}>Edit</button>
                 <button className="btn ghost small" onClick={() => openReset(r)}>Reset password</button>
-                <button className="btn danger small" onClick={() => remove(r.user_id)}>Remove</button>
+                <button className="btn danger small" disabled={removingId === r.user_id} onClick={() => remove(r)}>{removingId === r.user_id ? 'Removing…' : 'Remove'}</button>
               </div></td>
             </tr>
           ))}</tbody>
@@ -4117,7 +4145,7 @@ function TeacherAccess() {
           {edit.isNew && (
             <>
               <Field label="User ID" value={edit.user_id} onChange={(e) => setEdit({ ...edit, user_id: e.target.value })} placeholder="Paste the UUID from Supabase → Authentication → Users" />
-              <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -8 }}>Create the login itself in Supabase first (Authentication → Users → Add user), then paste their User UID here.</p>
+              <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -8 }}>Create the login itself in Supabase first (Authentication → Users → Add user), then paste their User UID here. Do this right away: until this row is saved, the new login has full admin access.</p>
             </>
           )}
           <div className="field row2">
@@ -4222,6 +4250,12 @@ function SeasonRollover() {
       name: c.name, level: c.level, day_of_week: c.day_of_week, start_time: c.start_time,
       end_time: c.end_time, location: c.location, capacity: c.capacity, instructor_name: c.instructor_name,
       min_age: c.min_age, max_age: c.max_age, active: true, season: targetSeason,
+      // Everything else a class carries. Leaving these out meant every
+      // rolled-forward class lost its room, its linked teacher (so teacher
+      // logins saw an empty "My Classes"), its helpers, and its "In
+      // recital" tick (so recital ticket eligibility had to be redone).
+      room_id: c.room_id, teacher_id: c.teacher_id, in_recital: c.in_recital,
+      ta_name: c.ta_name, class_mom: c.class_mom, assistant_name: c.assistant_name,
     }))
     let copiedCount = 0
     if (payload.length) {
