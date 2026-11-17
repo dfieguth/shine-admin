@@ -3527,19 +3527,89 @@ function MonthlyRosterPrint({ classes }) {
 }
 
 const BUCKET = 'site-photos'
+
+// ---- Gallery photo sizes -------------------------------------------------
+// Phone and camera photos are 3 to 25 MB each. Sending those to every
+// visitor is slow and uses up the Supabase data allowance, so each gallery
+// photo is kept in three folders under the SAME file name:
+//   gallery/        the original, untouched (never shown once optimized)
+//   gallery-thumb/  small copy for the photo grid
+//   gallery-large/  bigger copy shown when a visitor clicks a photo
+// The public site falls back to the original for any photo that has no
+// small copies yet, so nothing breaks before "Optimize" has been run.
+const PHOTO_SIZES = [
+  { folder: 'gallery-thumb', maxW: 640, maxH: 1280, quality: 0.72 },
+  { folder: 'gallery-large', maxW: 2000, maxH: 2000, quality: 0.82 },
+]
+const PHOTO_CACHE = '31536000' // browsers may keep these copies for a year
+
+// Shrinks a photo inside the browser. Returns a JPEG Blob, or null when the
+// browser cannot read the file (the photo then simply stays full size).
+async function shrinkPhoto(blob, maxW, maxH, quality) {
+  try {
+    let bmp
+    try { bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' }) }
+    catch { bmp = await createImageBitmap(blob) }
+    const scale = Math.min(1, maxW / bmp.width, maxH / bmp.height)
+    const w = Math.max(1, Math.round(bmp.width * scale))
+    const h = Math.max(1, Math.round(bmp.height * scale))
+    // Halve repeatedly before the final draw: one big jump looks jagged.
+    let src = bmp, sw = bmp.width, sh = bmp.height
+    while (sw / 2 >= w && sh / 2 >= h && sw > 1 && sh > 1) {
+      const step = document.createElement('canvas')
+      step.width = Math.max(1, Math.floor(sw / 2)); step.height = Math.max(1, Math.floor(sh / 2))
+      const sctx = step.getContext('2d')
+      sctx.imageSmoothingQuality = 'high'
+      sctx.drawImage(src, 0, 0, step.width, step.height)
+      src = step; sw = step.width; sh = step.height
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = w; canvas.height = h
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h) // see-through photos get a white background
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(src, 0, 0, w, h)
+    if (bmp.close) bmp.close()
+    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality))
+  } catch (e) {
+    console.error('Photos: could not shrink photo —', e)
+    return null
+  }
+}
+
+// Makes and uploads both small copies of one gallery photo. True on success.
+async function makePhotoSizes(name, blob) {
+  for (const sz of PHOTO_SIZES) {
+    const small = await shrinkPhoto(blob, sz.maxW, sz.maxH, sz.quality)
+    if (!small) return false
+    const { error } = await supabase.storage.from(BUCKET).upload(sz.folder + '/' + name, small, { upsert: true, contentType: 'image/jpeg', cacheControl: PHOTO_CACHE })
+    if (error) { console.error('Photos: could not save', sz.folder, 'copy of', name, error); return false }
+  }
+  return true
+}
+
 function Photos() {
   const [heroUrl, setHeroUrl] = useState(null)
   const [gallery, setGallery] = useState(null)
   const [busy, setBusy] = useState('')
+  const [progress, setProgress] = useState(null) // { done, total } while optimizing
 
   const load = useCallback(async () => {
-    const { data: root } = await supabase.storage.from(BUCKET).list('', { limit: 100 })
+    const store = supabase.storage.from(BUCKET)
+    const { data: root } = await store.list('', { limit: 100 })
     const hero = (root || []).find((f) => f.name === 'hero.jpg')
-    setHeroUrl(hero ? supabase.storage.from(BUCKET).getPublicUrl('hero.jpg').data.publicUrl + '?v=' + Date.parse(hero.updated_at || hero.created_at || Date.now()) : null)
-    const { data: gal } = await supabase.storage.from(BUCKET).list('gallery', { limit: 100 })
-    setGallery((gal || []).filter((f) => f.name !== '.emptyFolderPlaceholder').map((f) => ({
-      name: f.name,
-      url: supabase.storage.from(BUCKET).getPublicUrl('gallery/' + f.name).data.publicUrl,
+    setHeroUrl(hero ? store.getPublicUrl('hero.jpg').data.publicUrl + '?v=' + Date.parse(hero.updated_at || hero.created_at || Date.now()) : null)
+    const names = async (folder) => {
+      const { data } = await store.list(folder, { limit: 500 })
+      return (data || []).map((f) => f.name).filter((n) => n !== '.emptyFolderPlaceholder')
+    }
+    const [gal, thumbs, larges] = await Promise.all([names('gallery'), names('gallery-thumb'), names('gallery-large')])
+    const t = new Set(thumbs), l = new Set(larges)
+    setGallery(gal.map((name) => ({
+      name,
+      // Show the small copy here too, so opening this screen is quick.
+      url: store.getPublicUrl((t.has(name) ? 'gallery-thumb/' : 'gallery/') + name).data.publicUrl,
+      optimized: t.has(name) && l.has(name),
     })))
   }, [])
   useEffect(() => { load() }, [load])
@@ -3555,19 +3625,38 @@ function Photos() {
   }
   async function uploadGallery(e) {
     const files = Array.from(e.target.files || []); if (!files.length) return
+    e.target.value = '' // lets the same file be picked again later
     setBusy('gallery'); setPhotoErr('')
     const failed = []
     for (const file of files) {
       const safe = Date.now() + '-' + file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_')
-      const { error } = await supabase.storage.from(BUCKET).upload('gallery/' + safe, file, { contentType: file.type })
-      if (error) { console.error('Photos: gallery upload failed for', file.name, error); failed.push(file.name) }
+      const { error } = await supabase.storage.from(BUCKET).upload('gallery/' + safe, file, { contentType: file.type, cacheControl: PHOTO_CACHE })
+      if (error) { console.error('Photos: gallery upload failed for', file.name, error); failed.push(file.name); continue }
+      // Small copies are made right away. If that fails the photo still
+      // shows (full size) and the Optimize button offers to try again.
+      await makePhotoSizes(safe, file)
     }
     setBusy('')
     if (failed.length) setPhotoErr(`Some photos didn't upload: ${failed.join(', ')}. Try those again.`)
     load()
   }
+  async function optimizeAll() {
+    const todo = (gallery || []).filter((g) => !g.optimized)
+    if (!todo.length) return
+    setBusy('optimize'); setPhotoErr(''); setProgress({ done: 0, total: todo.length })
+    const failed = []
+    for (let i = 0; i < todo.length; i++) {
+      const { data: blob, error } = await supabase.storage.from(BUCKET).download('gallery/' + todo[i].name)
+      const ok = !error && blob ? await makePhotoSizes(todo[i].name, blob) : false
+      if (!ok) { if (error) console.error('Photos: could not open', todo[i].name, error); failed.push(todo[i].name) }
+      setProgress({ done: i + 1, total: todo.length })
+    }
+    setBusy(''); setProgress(null)
+    if (failed.length) setPhotoErr(`${failed.length} photo${failed.length === 1 ? '' : 's'} could not be optimized and will keep loading full size. You can press Optimize again, or remove and re-upload ${failed.length === 1 ? 'it' : 'them'}.`)
+    load()
+  }
   async function removeGallery(name) {
-    const { error } = await supabase.storage.from(BUCKET).remove(['gallery/' + name])
+    const { error } = await supabase.storage.from(BUCKET).remove(['gallery/' + name, 'gallery-thumb/' + name, 'gallery-large/' + name])
     if (error) { console.error('Photos: removeGallery failed —', error); alert(`Could not remove photo: ${error.message}`); return }
     load()
   }
@@ -3597,8 +3686,8 @@ function Photos() {
           : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12, marginBottom: 14 }}>
               {gallery.map((g) => (
                 <div key={g.name} style={{ position: 'relative' }}>
-                  <img src={g.url} alt="" style={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 8 }} />
-                  <button className="btn danger small" style={{ position: 'absolute', top: 6, right: 6 }} onClick={() => removeGallery(g.name)}>✕</button>
+                  <img src={g.url} alt="" loading="lazy" style={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 8 }} />
+                  <button className="btn danger small" style={{ position: 'absolute', top: 6, right: 6 }} onClick={() => removeGallery(g.name)} disabled={busy !== ''} aria-label="Remove photo">✕</button>
                 </div>
               ))}
             </div>}
@@ -3606,6 +3695,20 @@ function Photos() {
           {busy === 'gallery' ? 'Uploading…' : 'Add gallery photos'}
           <input type="file" accept="image/*" multiple onChange={uploadGallery} style={{ display: 'none' }} disabled={busy !== ''} />
         </label>
+        {(() => {
+          const pending = gallery.filter((g) => !g.optimized).length
+          if (!gallery.length) return null
+          if (busy === 'optimize' && progress) return (
+            <p role="status" style={{ fontSize: 13.5, marginTop: 14 }}><strong>Optimizing photo {Math.min(progress.done + 1, progress.total)} of {progress.total}…</strong> Please keep this tab open until it finishes.</p>
+          )
+          if (pending === 0) return <p style={{ color: 'var(--ink-soft)', fontSize: 13, marginTop: 12 }}>All {gallery.length} photos are optimized for fast loading. New photos are optimized automatically when you add them.</p>
+          return (
+            <div style={{ background: '#fff8e6', border: '1px solid #f0dca8', padding: '12px 14px', borderRadius: 8, marginTop: 14, fontSize: 13.5 }}>
+              <p style={{ marginBottom: 10 }}><strong>{pending} photo{pending === 1 ? ' is' : 's are'} still full size,</strong> which makes the website load slowly. Optimizing makes a small copy for the website. Your original photos are kept.</p>
+              <button className="btn" onClick={optimizeAll} disabled={busy !== ''}>Optimize {pending} photo{pending === 1 ? '' : 's'}</button>
+            </div>
+          )
+        })()}
       </div>
     </>
   )
