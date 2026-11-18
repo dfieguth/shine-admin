@@ -4569,16 +4569,16 @@ function SeasonRollover() {
 // ============================================================
 
 function RecitalTickets() {
-  const [tab, setTab] = useState('settings') // 'settings' | 'shows' | 'reservations'
+  const [tab, setTab] = useState('reservations') // 'reservations' | 'shows' | 'settings'
   return (
     <>
-      <div className="page-head"><div><h1>Recital Tickets</h1><p>Shows, capacity, and who's reserved so far.</p></div></div>
+      <div className="page-head"><div><h1>Recital tickets and shows</h1><p>Who has reserved, the shows, and how many seats there are. The public page and the emails have their own screens under Recital in the menu.</p></div></div>
       <div className="view-toggle" style={{ marginBottom: 16 }}>
-        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}>Settings & Release</button>
-        <button className={tab === 'shows' ? 'active' : ''} onClick={() => setTab('shows')}>Shows</button>
         <button className={tab === 'reservations' ? 'active' : ''} onClick={() => setTab('reservations')}>Reservations</button>
+        <button className={tab === 'shows' ? 'active' : ''} onClick={() => setTab('shows')}>Shows</button>
+        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}>Seats & Release</button>
       </div>
-      {tab === 'settings' && <RecitalSettingsTab />}
+      {tab === 'settings' && <RecitalSettingsTab part="seats" />}
       {tab === 'shows' && <RecitalShowsTab />}
       {tab === 'reservations' && <RecitalReservationsTab />}
     </>
@@ -4663,7 +4663,28 @@ function fillShowPlaceholders(text, show) {
     .replaceAll('{show_time}', show?.show_time || 'the scheduled time')
 }
 
-function RecitalSettingsTab() {
+// Recital → Tickets Page and Recital → Recital Emails. Both edit the same
+// settings row as Seats & Release, through the same component; each screen
+// only shows its own part.
+function RecitalPageScreen() {
+  return (
+    <>
+      <div className="page-head"><div><h1>Recital tickets page</h1><p>What families see on the website: whether the page is open, the coming soon page, the wording, and an optional banner on the main page.</p></div></div>
+      <RecitalSettingsTab part="page" />
+    </>
+  )
+}
+function RecitalEmailsScreen() {
+  return (
+    <>
+      <div className="page-head"><div><h1>Recital emails</h1><p>The confirmation, waitlist and reminder emails families get, and the automatic reminder.</p></div></div>
+      <RecitalSettingsTab part="emails" />
+    </>
+  )
+}
+
+// part: 'seats' (Tickets & Shows → Seats & Release), 'page' or 'emails'.
+function RecitalSettingsTab({ part = 'seats' }) {
   const [settings, setSettings] = useState(null)
   const [saving, setSaving] = useState(false)
   const [savedNote, setSavedNote] = useState('')
@@ -4699,6 +4720,9 @@ function RecitalSettingsTab() {
     const base = data || { id: 1, capacity_mode: 'per_show', combined_capacity: '', reservation_deadline: '', released: false }
     // Blank email wording shows the default text, so the editor is never empty.
     const withDefaults = { ...base }
+    // The page wording and main page banner need migration 46. Until it has
+    // run, those fields are left out of the screen and out of saving.
+    withDefaults._hasWording = !!data && Object.prototype.hasOwnProperty.call(data, 'home_banner_enabled')
     if (!withDefaults.page_mode) withDefaults.page_mode = withDefaults.page_enabled ? 'open' : 'hidden'
     if (withDefaults.coming_soon_show_dates == null) withDefaults.coming_soon_show_dates = true
     for (const k of Object.keys(RECITAL_EMAIL_DEFAULTS)) if (!withDefaults[k]) withDefaults[k] = RECITAL_EMAIL_DEFAULTS[k]
@@ -4749,6 +4773,14 @@ function RecitalSettingsTab() {
       // new Date() parses a timezone-less string as LOCAL time, and
       // toISOString() then converts that to the correct UTC instant.
       reservation_deadline: settings.reservation_deadline ? new Date(settings.reservation_deadline).toISOString() : null,
+      ...(settings._hasWording ? {
+        page_title: text(settings.page_title),
+        page_intro: text(settings.page_intro),
+        ticket_note: text(settings.ticket_note),
+        closed_message: text(settings.closed_message),
+        home_banner_enabled: !!settings.home_banner_enabled,
+        home_banner_text: text(settings.home_banner_text),
+      } : {}),
     }).eq('id', 1)
     setSaving(false)
     if (error) { console.error('RecitalSettings: save failed —', error); setSavedNote(`Could not save: ${error.message}`); return }
@@ -4772,9 +4804,16 @@ function RecitalSettingsTab() {
   if (!settings) return <div className="loading">Loading…</div>
   const deadlinePassed = settings.reservation_deadline && new Date(settings.reservation_deadline) <= new Date()
 
+  const saveRow = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+      {savedNote && <span style={{ fontSize: 14, color: savedNote.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)' }}>{savedNote}</span>}
+    </div>
+  )
+
   return (
     <>
-      <div className="card card-pad" style={{ marginBottom: 18 }}>
+      {part === 'seats' && <div className="card card-pad" style={{ marginBottom: 18 }}>
         <h3 style={{ marginTop: 0 }}>Status</h3>
         {settings.released ? (
           <div style={{ background: '#eaf6ef', border: '1px solid #bfe3cc', color: '#2f7d5b', padding: '10px 12px', borderRadius: 8, fontSize: 14 }}>
@@ -4790,10 +4829,10 @@ function RecitalSettingsTab() {
             <br /><button className="btn small" style={{ marginTop: 10 }} onClick={releaseNow} disabled={releasing}>{releasing ? 'Releasing…' : 'Release remaining tickets to everyone now'}</button>
           </div>
         )}
-      </div>
+      </div>}
 
-      <div className="card card-pad" style={{ marginBottom: 18 }}>
-        <h3 style={{ marginTop: 0 }}>Public tickets page</h3>
+      {part === 'page' && <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Page status</h3>
         <div className="field">
           <label>Tickets page status</label>
           <select value={settings.page_mode} onChange={(e) => setSettings({ ...settings, page_mode: e.target.value })}>
@@ -4832,6 +4871,72 @@ function RecitalSettingsTab() {
             <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '6px 0 0' }}>The photo saves as soon as you choose it. It is public once the page is in coming soon mode.</p>
           </div>
         </div>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 0' }}>Show names, dates, times, seats and access codes are under <strong>Recital → Tickets & Shows → Shows</strong>. Add one for each performance, and edit or replace them each year.</p>
+      </div>}
+
+      {part === 'page' && <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Wording on the tickets page</h3>
+        <p style={{ fontSize: 13, color: 'var(--ink-soft)', margin: '0 0 12px' }}>Leave any box blank to use the standard wording, shown in grey inside the box.</p>
+        <Field label="Notes shown above the form (optional)" textarea rows={4} value={settings.page_notes || ''} onChange={(e) => setSettings({ ...settings, page_notes: e.target.value })} placeholder="e.g. Children on a lap don't need a ticket. Doors open 30 minutes before each show." />
+        {settings._hasWording ? (
+          <>
+            <Field label="Page heading while reservations are open" value={settings.page_title || ''} onChange={(e) => setSettings({ ...settings, page_title: e.target.value })} placeholder="Reserve your recital tickets" />
+            <Field label="Who can reserve (the highlighted line above the form, before tickets are released to everyone)" textarea rows={2} value={settings.page_intro || ''} onChange={(e) => setSettings({ ...settings, page_intro: e.target.value })} placeholder="Reservations are open to performing families. You will need the access code for your dancer's show. Each show has its own code." />
+            <Field label="Under the ticket, after a family reserves" textarea rows={2} value={settings.ticket_note || ''} onChange={(e) => setSettings({ ...settings, ticket_note: e.target.value })} placeholder="Please bring this ticket to the show, printed or on your phone. It is good for this performance only." />
+            <Field label="Shown when the page is hidden (for anyone who finds the address)" textarea rows={2} value={settings.closed_message || ''} onChange={(e) => setSettings({ ...settings, closed_message: e.target.value })} placeholder="Recital ticket reservations aren't open yet. Check back soon, or email Corrie at shineGHFC@gmail.com with any questions." />
+          </>
+        ) : (
+          <p style={{ background: '#fff8e6', border: '1px solid #f0dca8', padding: '10px 12px', borderRadius: 8, fontSize: 13.5 }}>Editing the rest of the page wording and the main page banner needs migration 46 in the database. Everything else on this screen works now.</p>
+        )}
+      </div>}
+
+      {part === 'page' && settings._hasWording && <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Banner on the main page</h3>
+        <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 14 }}>
+          <input type="checkbox" checked={!!settings.home_banner_enabled} onChange={(e) => setSettings({ ...settings, home_banner_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
+          <span style={{ flex: 1 }}><strong>Show a recital banner at the top of the main page</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>It links to the tickets page. It only appears while the page status is Coming soon or Open, so it disappears by itself when you set the page back to Hidden after the show.</span></span>
+        </label>
+        <Field label="Banner wording (optional)" textarea rows={2} value={settings.home_banner_text || ''} onChange={(e) => setSettings({ ...settings, home_banner_text: e.target.value })} placeholder={settings.page_mode === 'open' ? 'Recital tickets are open! Reserve your seats.' : 'Recital tickets are coming soon.'} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 0' }}>Blank uses the grey wording, which changes by itself between "coming soon" and "open".</p>
+      </div>}
+
+      {part === 'page' && saveRow}
+
+      {part === 'emails' && <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Email settings</h3>
+        <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 14 }}>
+          <input type="checkbox" checked={!!settings.emails_enabled} onChange={(e) => setSettings({ ...settings, emails_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
+          <span style={{ flex: 1 }}><strong>Allow recital emails to be sent</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Leave this off while testing. When it is off, families get no confirmation email, and the reminder button under Tickets & Shows → Reservations can only send a test to you.</span></span>
+        </label>
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 10px' }}>You can use {'{show_name}'}, {'{show_date}'} and {'{show_time}'} in either email. The confirmation and waitlist emails can also use {'{parent_name}'}, {'{ticket_count}'} (confirmed tickets) and {'{waitlist_count}'} (waitlisted tickets).</p>
+        <Field label="Reminder email: subject" value={settings.reminder_subject || ''} onChange={(e) => setSettings({ ...settings, reminder_subject: e.target.value })} />
+        <Field label="Reminder email: message" textarea rows={7} value={settings.reminder_body || ''} onChange={(e) => setSettings({ ...settings, reminder_body: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Send it yourself any time from <strong>Tickets & Shows → Reservations</strong> with "Email a reminder", or have it go out by itself:</p>
+        <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
+          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!settings.auto_reminder_enabled} onChange={(e) => setSettings({ ...settings, auto_reminder_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
+            <span style={{ flex: 1 }}><strong>Send the reminder automatically before each show</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Goes to everyone with confirmed tickets for that show, once, at about 9 AM Pacific. It only sends while "Allow recital emails to be sent" above is also ticked.</span></span>
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '10px 0 0 26px', fontSize: 14 }}>
+            <input type="number" min="1" max="30" value={settings.auto_reminder_days ?? 2} onChange={(e) => setSettings({ ...settings, auto_reminder_days: e.target.value })} style={{ width: 70 }} />
+            <span>day{Number(settings.auto_reminder_days ?? 2) === 1 ? '' : 's'} before the show</span>
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '8px 0 0 26px' }}>Tickets & Shows → Shows lists the date each show's reminder will go out, and when it was sent.</p>
+        </div>
+        <Field label="Confirmation email: subject" value={settings.confirm_subject || ''} onChange={(e) => setSettings({ ...settings, confirm_subject: e.target.value })} />
+        <Field label="Confirmation email: message" textarea rows={7} value={settings.confirm_body || ''} onChange={(e) => setSettings({ ...settings, confirm_body: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Sent automatically to a family the moment they reserve, but only while "Allow recital emails to be sent" is ticked above.</p>
+        <Field label="Added to the confirmation when some of their tickets are waitlisted" textarea rows={2} value={settings.waitlist_note || ''} onChange={(e) => setSettings({ ...settings, waitlist_note: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Example: a family asks for 4 and only 2 seats are left. They get the confirmation above for 2, with this line added about the other 2.</p>
+        <Field label="Waitlist email: subject" value={settings.waitlist_subject || ''} onChange={(e) => setSettings({ ...settings, waitlist_subject: e.target.value })} />
+        <Field label="Waitlist email: message" textarea rows={6} value={settings.waitlist_body || ''} onChange={(e) => setSettings({ ...settings, waitlist_body: e.target.value })} />
+        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 0' }}>Sent instead of the confirmation when a show is full and none of their tickets are confirmed. Keep it clear that they do not have seats yet.</p>
+      </div>}
+
+      {part === 'emails' && saveRow}
+
+      {part === 'seats' && <div className="card card-pad" style={{ marginBottom: 18 }}>
+        <h3 style={{ marginTop: 0 }}>Seats and limits</h3>
         <div className="field row2">
           <Field label="Tickets per family" type="number" min="1" max="50" value={settings.max_per_family ?? 6} onChange={(e) => setSettings({ ...settings, max_per_family: e.target.value })} />
           <div className="field">
@@ -4842,43 +4947,7 @@ function RecitalSettingsTab() {
             </select>
           </div>
         </div>
-        <Field label="Notes shown on the tickets page (optional)" textarea rows={4} value={settings.page_notes || ''} onChange={(e) => setSettings({ ...settings, page_notes: e.target.value })} placeholder="e.g. Children on a lap don't need a ticket. Doors open 30 minutes before each show." />
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Show names, dates, times and seat counts are on the <strong>Shows</strong> tab. Add one for each performance, and edit or replace them each year.</p>
-      </div>
 
-      <div className="card card-pad" style={{ marginBottom: 18 }}>
-        <h3 style={{ marginTop: 0 }}>Recital emails</h3>
-        <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer', marginBottom: 14 }}>
-          <input type="checkbox" checked={!!settings.emails_enabled} onChange={(e) => setSettings({ ...settings, emails_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
-          <span style={{ flex: 1 }}><strong>Allow recital emails to be sent</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Leave this off while testing. When it is off, families get no confirmation email, and the reminder button on the Reservations tab can only send a test to you.</span></span>
-        </label>
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '0 0 10px' }}>You can use {'{show_name}'}, {'{show_date}'} and {'{show_time}'} in either email. The confirmation and waitlist emails can also use {'{parent_name}'}, {'{ticket_count}'} (confirmed tickets) and {'{waitlist_count}'} (waitlisted tickets).</p>
-        <Field label="Reminder email: subject" value={settings.reminder_subject || ''} onChange={(e) => setSettings({ ...settings, reminder_subject: e.target.value })} />
-        <Field label="Reminder email: message" textarea rows={7} value={settings.reminder_body || ''} onChange={(e) => setSettings({ ...settings, reminder_body: e.target.value })} />
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Send it yourself any time from the <strong>Reservations</strong> tab with "Email a reminder", or have it go out by itself:</p>
-        <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
-          <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
-            <input type="checkbox" checked={!!settings.auto_reminder_enabled} onChange={(e) => setSettings({ ...settings, auto_reminder_enabled: e.target.checked })} style={{ marginTop: 4, width: 'auto', flex: '0 0 auto' }} />
-            <span style={{ flex: 1 }}><strong>Send the reminder automatically before each show</strong><br /><span style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Goes to everyone with confirmed tickets for that show, once, at about 9 AM Pacific. It only sends while "Allow recital emails to be sent" above is also ticked.</span></span>
-          </label>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '10px 0 0 26px', fontSize: 14 }}>
-            <input type="number" min="1" max="30" value={settings.auto_reminder_days ?? 2} onChange={(e) => setSettings({ ...settings, auto_reminder_days: e.target.value })} style={{ width: 70 }} />
-            <span>day{Number(settings.auto_reminder_days ?? 2) === 1 ? '' : 's'} before the show</span>
-          </div>
-          <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '8px 0 0 26px' }}>The Shows tab shows the date each show's reminder will go out, and when it was sent.</p>
-        </div>
-        <Field label="Confirmation email: subject" value={settings.confirm_subject || ''} onChange={(e) => setSettings({ ...settings, confirm_subject: e.target.value })} />
-        <Field label="Confirmation email: message" textarea rows={7} value={settings.confirm_body || ''} onChange={(e) => setSettings({ ...settings, confirm_body: e.target.value })} />
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Sent automatically to a family the moment they reserve, but only while "Allow recital emails to be sent" is ticked above.</p>
-        <Field label="Added to the confirmation when some of their tickets are waitlisted" textarea rows={2} value={settings.waitlist_note || ''} onChange={(e) => setSettings({ ...settings, waitlist_note: e.target.value })} />
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Example: a family asks for 4 and only 2 seats are left. They get the confirmation above for 2, with this line added about the other 2.</p>
-        <Field label="Waitlist email: subject" value={settings.waitlist_subject || ''} onChange={(e) => setSettings({ ...settings, waitlist_subject: e.target.value })} />
-        <Field label="Waitlist email: message" textarea rows={6} value={settings.waitlist_body || ''} onChange={(e) => setSettings({ ...settings, waitlist_body: e.target.value })} />
-        <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', margin: '4px 0 14px' }}>Sent instead of the confirmation when a show is full and none of their tickets are confirmed. Keep it clear that they do not have seats yet.</p>
-      </div>
-
-      <div className="card card-pad">
-        <h3 style={{ marginTop: 0 }}>Capacity</h3>
         <div className="field">
           <label>Capacity mode</label>
           <select value={settings.capacity_mode} onChange={(e) => setSettings({ ...settings, capacity_mode: e.target.value })}>
@@ -4887,15 +4956,15 @@ function RecitalSettingsTab() {
           </select>
         </div>
         {settings.capacity_mode === 'per_show' ? (
-          <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Set each show's own capacity on the Shows tab.</p>
+          <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>Set each show's own seat count on the Shows tab.</p>
         ) : (
           <Field label="Combined capacity (across all shows)" type="number" value={settings.combined_capacity ?? ''} onChange={(e) => setSettings({ ...settings, combined_capacity: e.target.value })} placeholder="Total seats across every show" />
         )}
         <Field label="Automatic release deadline (optional)" type="datetime-local" value={toLocalInputValue(settings.reservation_deadline)} onChange={(e) => setSettings({ ...settings, reservation_deadline: e.target.value })} />
         <p style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: -6 }}>Leave blank if you'd rather release manually whenever you decide, instead of on a fixed schedule.</p>
-        <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
-        {savedNote && <span style={{ marginLeft: 10, fontSize: 14, color: savedNote.startsWith('Could not') ? '#b23838' : 'var(--ok, #2f7d5b)' }}>{savedNote}</span>}
-      </div>
+      </div>}
+
+      {part === 'seats' && saveRow}
     </>
   )
 }
@@ -5207,7 +5276,7 @@ function RecitalReservationsTab() {
     setRemind((r) => ({ ...r, sending: false, note: res.ok ? `Test sent to ${me} ✓` : `Could not send the test: ${res.error}` }))
   }
   async function sendReminder() {
-    if (!emailSettings?.emails_enabled) { setRemind((r) => ({ ...r, note: 'Recital emails are switched off. Turn on "Allow recital emails to be sent" on the Settings & Release tab first.' })); return }
+    if (!emailSettings?.emails_enabled) { setRemind((r) => ({ ...r, note: 'Recital emails are switched off. Turn on "Allow recital emails to be sent" under Recital → Recital Emails first.' })); return }
     if (!remind.subject.trim() || !remind.body.trim()) { setRemind((r) => ({ ...r, note: 'Add a subject and a message first.' })); return }
     const targets = reminderTargets(remind.showId)
     const total = targets.reduce((n, t) => n + t.emails.length, 0)
@@ -5661,7 +5730,6 @@ const NAV = [
   { key: 'classes', label: 'Classes', group: 'classes' },
   { key: 'rooms', label: 'Rooms', group: 'classes' },
   { key: 'season', label: 'New Season', group: 'classes' },
-  { key: 'recital', label: 'Recital Tickets', group: 'classes' },
   { key: 'students', label: 'Students', group: 'people' },
   { key: 'needs-class', label: 'Needs a Class', group: 'people' },
   { key: 'families', label: 'Families', group: 'people' },
@@ -5670,6 +5738,9 @@ const NAV = [
   { key: 'registrations', label: 'Registrations', group: 'registration' },
   { key: 'parent-meetings', label: 'Parent Meetings', group: 'registration' },
   { key: 'interest', label: 'Interest List', group: 'registration' },
+  { key: 'recital', label: 'Tickets & Shows', group: 'recital' },
+  { key: 'recital-page', label: 'Tickets Page', group: 'recital' },
+  { key: 'recital-emails', label: 'Recital Emails', group: 'recital' },
   { key: 'photos', label: 'Photos', group: 'website' },
   { key: 'team', label: 'Our Team', group: 'website' },
   { key: 'testimonials', label: 'Testimonials', group: 'website' },
@@ -5683,6 +5754,7 @@ const NAV = [
 // Order here is the order groups render in the sidebar.
 const NAV_GROUPS = [
   { key: 'classes', label: 'Classes & Rosters' },
+  { key: 'recital', label: 'Recital' },
   { key: 'people', label: 'People' },
   { key: 'registration', label: 'Registration' },
   { key: 'website', label: 'Public Website' },
@@ -5848,6 +5920,8 @@ export default function App() {
         {safePage === 'privacy' && !isTeacher && <PrivacySettings />}
         {safePage === 'season' && !isTeacher && <SeasonRollover />}
         {safePage === 'recital' && !isTeacher && <RecitalTickets />}
+        {safePage === 'recital-page' && !isTeacher && <RecitalPageScreen />}
+        {safePage === 'recital-emails' && !isTeacher && <RecitalEmailsScreen />}
         {safePage === 'rooms' && <Rooms />}
         {safePage === 'registrations' && !isTeacher && <Registrations />}
         {safePage === 'parent-meetings' && !isTeacher && <ParentMeetings />}
