@@ -3593,6 +3593,9 @@ function Photos() {
   const [gallery, setGallery] = useState(null)
   const [busy, setBusy] = useState('')
   const [progress, setProgress] = useState(null) // { done, total } while optimizing
+  // false when the gallery_photos table (migration 45) cannot be read; the
+  // highlight / hide tick boxes are then left out instead of failing.
+  const [choicesOk, setChoicesOk] = useState(true)
 
   const load = useCallback(async () => {
     const store = supabase.storage.from(BUCKET)
@@ -3603,14 +3606,30 @@ function Photos() {
       const { data } = await store.list(folder, { limit: 500 })
       return (data || []).map((f) => f.name).filter((n) => n !== '.emptyFolderPlaceholder')
     }
-    const [gal, thumbs, larges] = await Promise.all([names('gallery'), names('gallery-thumb'), names('gallery-large')])
+    const [gal, thumbs, larges, choices] = await Promise.all([
+      names('gallery'), names('gallery-thumb'), names('gallery-large'),
+      supabase.from('gallery_photos').select('name, show_in_gallery, featured, sort_order'),
+    ])
+    if (choices.error) console.error('Photos: could not read gallery choices (has migration 45 been run?) —', choices.error)
+    setChoicesOk(!choices.error)
     const t = new Set(thumbs), l = new Set(larges)
-    setGallery(gal.map((name) => ({
-      name,
-      // Show the small copy here too, so opening this screen is quick.
-      url: store.getPublicUrl((t.has(name) ? 'gallery-thumb/' : 'gallery/') + name).data.publicUrl,
-      optimized: t.has(name) && l.has(name),
-    })))
+    const pick = new Map((choices.data || []).map((r) => [r.name, r]))
+    // Same order as the public site: Corrie's order first, then upload order.
+    const ordered = gal.map((name) => ({ name, sort: (pick.get(name) || {}).sort_order || 0 }))
+      .sort((x, y) => x.sort - y.sort || x.name.localeCompare(y.name))
+    setGallery(ordered.map(({ name, sort }) => {
+      const c = pick.get(name)
+      return {
+        sort,
+        name,
+        // Show the small copy here too, so opening this screen is quick.
+        url: store.getPublicUrl((t.has(name) ? 'gallery-thumb/' : 'gallery/') + name).data.publicUrl,
+        optimized: t.has(name) && l.has(name),
+        // No saved choice = shown in the gallery, not a highlight.
+        show: !c || c.show_in_gallery !== false,
+        featured: !!c && c.featured === true,
+      }
+    }))
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -3655,9 +3674,50 @@ function Photos() {
     if (failed.length) setPhotoErr(`${failed.length} photo${failed.length === 1 ? '' : 's'} could not be optimized and will keep loading full size. You can press Optimize again, or remove and re-upload ${failed.length === 1 ? 'it' : 'them'}.`)
     load()
   }
+  // Saves a tick box the moment it is changed. A hidden photo cannot also be
+  // a highlight, so hiding one clears its highlight tick.
+  async function setChoice(name, patch) {
+    const cur = (gallery || []).find((g) => g.name === name); if (!cur) return
+    const next = { show: cur.show, featured: cur.featured, ...patch }
+    if (!next.show) next.featured = false
+    setPhotoErr('')
+    setGallery((list) => list.map((g) => (g.name === name ? { ...g, ...next } : g)))
+    const { error } = await supabase.from('gallery_photos').upsert(
+      { name, show_in_gallery: next.show, featured: next.featured, sort_order: cur.sort || 0, updated_at: new Date().toISOString() },
+      { onConflict: 'name' }
+    )
+    if (error) {
+      console.error('Photos: could not save gallery choice —', error)
+      setPhotoErr(`That change was not saved: ${error.message}`)
+      load()
+    }
+  }
+  // Moves a photo one place earlier (-1) or later (+1). Saves the whole
+  // order at once so the public site shows the photos in this same order.
+  async function movePhoto(name, dir) {
+    const list = [...(gallery || [])]
+    const i = list.findIndex((g) => g.name === name), j = i + dir
+    if (i < 0 || j < 0 || j >= list.length) return
+    ;[list[i], list[j]] = [list[j], list[i]]
+    const next = list.map((g, k) => ({ ...g, sort: (k + 1) * 10 }))
+    setPhotoErr('')
+    setGallery(next)
+    const now = new Date().toISOString()
+    const { error } = await supabase.from('gallery_photos').upsert(
+      next.map((g) => ({ name: g.name, show_in_gallery: g.show, featured: g.featured, sort_order: g.sort, updated_at: now })),
+      { onConflict: 'name' }
+    )
+    if (error) {
+      console.error('Photos: could not save new order —', error)
+      setPhotoErr(`The new order was not saved: ${error.message}`)
+      load()
+    }
+  }
   async function removeGallery(name) {
     const { error } = await supabase.storage.from(BUCKET).remove(['gallery/' + name, 'gallery-thumb/' + name, 'gallery-large/' + name])
     if (error) { console.error('Photos: removeGallery failed —', error); alert(`Could not remove photo: ${error.message}`); return }
+    // Tidy up its saved choices too. Harmless if there were none.
+    await supabase.from('gallery_photos').delete().eq('name', name)
     load()
   }
 
@@ -3683,14 +3743,39 @@ function Photos() {
         <h3 style={{ marginBottom: 10 }}>Gallery photos</h3>
         {gallery.length === 0
           ? <p style={{ color: 'var(--ink-soft)', marginBottom: 12 }}>No gallery photos yet — the site shows "coming soon" tiles.</p>
-          : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12, marginBottom: 14 }}>
-              {gallery.map((g) => (
-                <div key={g.name} style={{ position: 'relative' }}>
-                  <img src={g.url} alt="" loading="lazy" style={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 8 }} />
-                  <button className="btn danger small" style={{ position: 'absolute', top: 6, right: 6 }} onClick={() => removeGallery(g.name)} disabled={busy !== ''} aria-label="Remove photo">✕</button>
-                </div>
-              ))}
-            </div>}
+          : <>
+              {choicesOk
+                ? <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12 }}>
+                    <strong style={{ color: 'var(--ink)' }}>{gallery.filter((g) => g.featured).length} on the main page</strong> · {gallery.filter((g) => g.show).length} in the gallery · {gallery.filter((g) => !g.show).length} hidden.
+                    {' '}<strong style={{ color: 'var(--ink)' }}>Main page highlight</strong> puts a photo in the scrolling strip on the home page (8 to 10 works well; if none are ticked, the first 10 are used). <strong style={{ color: 'var(--ink)' }}>Show in gallery</strong> keeps it on the Gallery page; untick it to hide a photo from the whole website without deleting it. The ‹ › arrows set the order for both. Changes save right away.
+                  </p>
+                : <p style={{ background: '#fff8e6', border: '1px solid #f0dca8', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 12 }}>Choosing main page highlights is not switched on yet (the database needs migration 45). Uploading and removing photos works as usual.</p>}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 14 }}>
+                {gallery.map((g, i) => (
+                  <div key={g.name} style={{ border: '1px solid ' + (g.featured ? 'var(--pine)' : 'var(--line)'), borderRadius: 10, padding: 6, background: '#fff' }}>
+                    <div style={{ position: 'relative' }}>
+                      <img src={g.url} alt={`Gallery photo ${i + 1}`} loading="lazy" style={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 6, display: 'block', opacity: g.show ? 1 : 0.35 }} />
+                      <button className="btn danger small" style={{ position: 'absolute', top: 6, right: 6, background: '#fff' }} onClick={() => removeGallery(g.name)} disabled={busy !== ''} aria-label={`Remove photo ${i + 1}`}>✕</button>
+                    </div>
+                    {choicesOk && (
+                      <div style={{ display: 'grid', gap: 4, marginTop: 6, fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: g.show ? 'pointer' : 'default', opacity: g.show ? 1 : 0.5 }}>
+                          <input type="checkbox" style={{ width: 'auto', flex: '0 0 auto', margin: 0 }} checked={g.featured} disabled={!g.show} onChange={(e) => setChoice(g.name, { featured: e.target.checked })} /> <span>Main page highlight</span>
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input type="checkbox" style={{ width: 'auto', flex: '0 0 auto', margin: 0 }} checked={g.show} onChange={(e) => setChoice(g.name, { show: e.target.checked })} /> <span>Show in gallery</span>
+                        </label>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4, marginTop: 2 }}>
+                          <button type="button" className="btn ghost small" style={{ padding: '2px 10px' }} onClick={() => movePhoto(g.name, -1)} disabled={i === 0 || busy !== ''} aria-label={`Move photo ${i + 1} earlier`}>‹</button>
+                          <span style={{ color: 'var(--ink-soft)', fontSize: 12 }}>#{i + 1}</span>
+                          <button type="button" className="btn ghost small" style={{ padding: '2px 10px' }} onClick={() => movePhoto(g.name, 1)} disabled={i === gallery.length - 1 || busy !== ''} aria-label={`Move photo ${i + 1} later`}>›</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>}
         <label className="btn" style={{ display: 'inline-block' }}>
           {busy === 'gallery' ? 'Uploading…' : 'Add gallery photos'}
           <input type="file" accept="image/*" multiple onChange={uploadGallery} style={{ display: 'none' }} disabled={busy !== ''} />
