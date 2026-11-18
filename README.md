@@ -12,7 +12,7 @@ The internal tool for managing classes, students, families, and enrollments. Rep
 - **Registrations** — a log of everyone who registered through the public site. Registering already creates the family, student and enrollment, so nothing here needs approving.
 - **Teachers** — your teaching team's contact info in one place. Names entered here appear as suggestions when setting a class instructor.
 - **Attendance** — pick a class and a date, check off who's present, save. Tap a row to toggle.
-- **Photos** — upload the public site's hero photo and gallery photos right from a phone. No code needed.
+- **Photos** — upload the public site's hero photo and gallery photos right from a phone. No code needed. Each gallery photo is stored three ways under the same name in the `site-photos` bucket: `gallery/` (original, kept), `gallery-thumb/` (small, for grids) and `gallery-large/` (shown on click). New uploads get the small copies automatically; the Optimize button makes them for older photos. Tick boxes choose which photos are main page highlights and which are hidden, and arrows set the order (table `gallery_photos`, migration 45).
 - **Announcements** — post breaks/closures with optional start and end dates; they appear as a banner on the public site and expire automatically.
 - **Recital Tickets** — shows, seat counts, an access code per show, the public tickets page (hidden, coming soon or open), reservations, printed tickets, the door list, and recital emails including an automatic reminder before each show.
 - **Teacher Access** — limited logins for teachers, and which screens each one can see.
@@ -24,7 +24,7 @@ The internal tool for managing classes, students, families, and enrollments. Rep
 - Go to supabase.com, create a new project. Pick a strong database password and save it.
 - When it finishes provisioning, open the **SQL Editor**, paste the entire contents of `schema.sql`, and run it.
 - Then run every `migration-N.sql` file in number order, one at a time, **skipping 2, 3, 4 and 9**. Those four are already built into `schema.sql`, and running them again stops with an "already exists" error.
-- `schema.sql` on its own is NOT the full database. It is the starting point, and the migrations bring it up to date. (Checked November 2026: this exact sequence, through migration 44, builds the same database as the live one.)
+- `schema.sql` on its own is NOT the full database. It is the starting point, and the migrations bring it up to date. (Checked November 2026: this exact sequence, through migration 45, builds the same database as the live one.)
 - Never edit a migration that has already been run. A change goes in a new, higher-numbered migration file.
 
 ### 2. Create your first staff login
