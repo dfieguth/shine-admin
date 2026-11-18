@@ -3596,6 +3596,22 @@ function Photos() {
   // false when the gallery_photos table (migration 45) cannot be read; the
   // highlight / hide tick boxes are then left out instead of failing.
   const [choicesOk, setChoicesOk] = useState(true)
+  // Slideshow timing (migration 47). null = table not there yet.
+  const [timing, setTiming] = useState(null)
+  const [timingMsg, setTimingMsg] = useState('')
+  useEffect(() => {
+    supabase.from('gallery_settings').select('show_seconds, fade_seconds').eq('id', 1).maybeSingle().then(({ data, error }) => {
+      if (error) { console.error('Photos: could not read slideshow timing (has migration 47 been run?) —', error); return }
+      if (data) setTiming({ show: Number(data.show_seconds), fade: Number(data.fade_seconds) })
+    })
+  }, [])
+  async function setTimingValue(patch) {
+    const next = { ...timing, ...patch }
+    setTiming(next); setTimingMsg('Saving…')
+    const { error } = await supabase.from('gallery_settings').upsert({ id: 1, show_seconds: next.show, fade_seconds: next.fade, updated_at: new Date().toISOString() })
+    if (error) { console.error('Photos: setTimingValue failed —', error); setTimingMsg('Could not save: ' + error.message); return }
+    setTimingMsg('Saved')
+  }
 
   const load = useCallback(async () => {
     const store = supabase.storage.from(BUCKET)
@@ -3739,6 +3755,28 @@ function Photos() {
         <p style={{ color: 'var(--ink-soft)', fontSize: 13, marginTop: 10 }}>Wide, landscape photos work best. The site darkens it slightly so the text stays readable.</p>
       </div>
 
+      {timing && (
+        <div className="card card-pad" style={{ marginBottom: 16 }}>
+          <h3 style={{ marginBottom: 6 }}>Slideshow timing</h3>
+          <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12 }}>How the main page highlights move. Saves right away; the website picks it up on the next page load.</p>
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <label style={{ display: 'block' }}>
+              <span style={{ display: 'block', fontSize: 13.5, marginBottom: 4 }}>Time each photo shows</span>
+              <select value={timing.show} onChange={(e) => setTimingValue({ show: Number(e.target.value) })}>
+                {[3, 3.5, 4, 4.5, 5, 5.5, 6].map((v) => <option key={v} value={v}>{v} seconds</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'block' }}>
+              <span style={{ display: 'block', fontSize: 13.5, marginBottom: 4 }}>Time of the fade between photos</span>
+              <select value={timing.fade} onChange={(e) => setTimingValue({ fade: Number(e.target.value) })}>
+                {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((v) => <option key={v} value={v}>{v} seconds</option>)}
+              </select>
+            </label>
+            <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>{timingMsg}</span>
+          </div>
+        </div>
+      )}
+
       <div className="card card-pad">
         <h3 style={{ marginBottom: 10 }}>Gallery photos</h3>
         {gallery.length === 0
@@ -3747,7 +3785,7 @@ function Photos() {
               {choicesOk
                 ? <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12 }}>
                     <strong style={{ color: 'var(--ink)' }}>{gallery.filter((g) => g.featured).length} on the main page</strong> · {gallery.filter((g) => g.show).length} in the gallery · {gallery.filter((g) => !g.show).length} hidden.
-                    {' '}<strong style={{ color: 'var(--ink)' }}>Main page highlight</strong> puts a photo in the scrolling strip on the home page (8 to 10 works well; if none are ticked, the first 10 are used). <strong style={{ color: 'var(--ink)' }}>Show in gallery</strong> keeps it on the Gallery page; untick it to hide a photo from the whole website without deleting it. The ‹ › arrows set the order for both. Changes save right away.
+                    {' '}<strong style={{ color: 'var(--ink)' }}>Main page highlight</strong> puts a photo in the slideshow on the home page (8 to 10 works well; if none are ticked, the first 10 are used). <strong style={{ color: 'var(--ink)' }}>Show in gallery</strong> keeps it on the Gallery page; untick it to hide a photo from the whole website without deleting it. The ‹ › arrows set the order for both. Changes save right away.
                   </p>
                 : <p style={{ background: '#fff8e6', border: '1px solid #f0dca8', padding: '10px 12px', borderRadius: 8, fontSize: 13.5, marginBottom: 12 }}>Choosing main page highlights is not switched on yet (the database needs migration 45). Uploading and removing photos works as usual.</p>}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 14 }}>
